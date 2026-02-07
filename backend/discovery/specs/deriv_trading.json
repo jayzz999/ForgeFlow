@@ -1,0 +1,164 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Deriv Trading API",
+    "version": "1.0.0",
+    "description": "Deriv WebSocket API for real-time trading, market data, ticks, and contract management on Deriv's proprietary synthetic indices and forex markets"
+  },
+  "servers": [{"url": "wss://ws.derivws.com/websockets/v3"}],
+  "paths": {
+    "/ticks": {
+      "post": {
+        "summary": "Subscribe to real-time price ticks for a symbol",
+        "description": "Subscribe to a real-time stream of price ticks for a given trading symbol (e.g. Volatility 75 Index, EUR/USD). Returns continuous price updates via WebSocket. Useful for monitoring price movements, building alerts, and triggering trading strategies.",
+        "operationId": "ticks_subscribe",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ticks"],
+                "properties": {
+                  "ticks": {"type": "string", "description": "Symbol to subscribe to (e.g. 'R_75' for Volatility 75 Index, '1HZ75V' for Vol 75 1s)"},
+                  "subscribe": {"type": "integer", "enum": [1], "description": "Set to 1 to subscribe to continuous updates"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tick data stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tick": {
+                      "type": "object",
+                      "properties": {
+                        "symbol": {"type": "string"},
+                        "quote": {"type": "number", "description": "Current price"},
+                        "epoch": {"type": "integer", "description": "Unix timestamp"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ticks_history": {
+      "post": {
+        "summary": "Get historical price ticks for a symbol",
+        "description": "Retrieve historical tick data or OHLC candles for a trading symbol. Supports different time granularities (1 minute to 1 day candles). Useful for backtesting, analysis, and calculating price movements over time periods.",
+        "operationId": "ticks_history",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ticks_history", "end", "count"],
+                "properties": {
+                  "ticks_history": {"type": "string", "description": "Symbol (e.g. 'R_75')"},
+                  "end": {"type": "string", "description": "'latest' or epoch timestamp"},
+                  "count": {"type": "integer", "description": "Number of ticks to return"},
+                  "granularity": {"type": "integer", "description": "Candle interval in seconds (60, 300, 900, 3600, 86400)"},
+                  "style": {"type": "string", "enum": ["ticks", "candles"], "description": "Data style"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Historical tick/candle data"}}
+      }
+    },
+    "/proposal": {
+      "post": {
+        "summary": "Get a price proposal for a trading contract",
+        "description": "Request a price quote for a derivatives contract before purchasing. Supports Rise/Fall, Higher/Lower, Touch/No Touch, and other contract types.",
+        "operationId": "proposal",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["proposal", "amount", "basis", "contract_type", "currency", "duration", "duration_unit", "symbol"],
+                "properties": {
+                  "proposal": {"type": "integer", "enum": [1]},
+                  "amount": {"type": "number", "description": "Trade amount"},
+                  "basis": {"type": "string", "enum": ["stake", "payout"]},
+                  "contract_type": {"type": "string", "description": "Contract type: CALL, PUT, DIGITDIFF, etc."},
+                  "currency": {"type": "string", "description": "Currency (e.g. 'USD')"},
+                  "duration": {"type": "integer"},
+                  "duration_unit": {"type": "string", "enum": ["t", "s", "m", "h", "d"]},
+                  "symbol": {"type": "string", "description": "Trading symbol (e.g. 'R_75')"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Contract proposal with pricing"}}
+      }
+    },
+    "/buy": {
+      "post": {
+        "summary": "Buy a trading contract on Deriv",
+        "description": "Purchase a derivatives contract using a proposal ID from a previous proposal request. Executes the trade on the user's account.",
+        "operationId": "buy",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["buy", "price"],
+                "properties": {
+                  "buy": {"type": "string", "description": "Proposal ID from a previous proposal response"},
+                  "price": {"type": "number", "description": "Maximum price to pay for the contract"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Contract purchased"}}
+      }
+    },
+    "/active_symbols": {
+      "post": {
+        "summary": "Get list of all available trading symbols",
+        "description": "Retrieve all active trading symbols available on Deriv, including synthetic indices (Volatility, Crash, Boom), forex pairs, commodities, and cryptocurrencies.",
+        "operationId": "active_symbols",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["active_symbols"],
+                "properties": {
+                  "active_symbols": {"type": "string", "enum": ["brief", "full"]}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "List of active symbols"}}
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiToken": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "app_id",
+        "description": "Deriv API application ID"
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Google Sheets API",
+    "version": "v4",
+    "description": "Google Sheets API for reading, writing, and managing spreadsheet data. Uses API key or service account for authentication."
+  },
+  "servers": [{"url": "https://sheets.googleapis.com/v4"}],
+  "paths": {
+    "/spreadsheets/{spreadsheetId}/values/{range}:append": {
+      "post": {
+        "summary": "Append data to a Google Sheet",
+        "description": "Append one or more rows of data to the end of a spreadsheet. Useful for logging, data collection, and creating audit trails. The sheet must be shared with the service account email or be publicly editable. Values must be provided as a nested array (list of lists).",
+        "operationId": "values_append",
+        "parameters": [
+          {"name": "spreadsheetId", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The ID of the Google Spreadsheet (from the URL)"},
+          {"name": "range", "in": "path", "required": true, "schema": {"type": "string"}, "description": "A1 notation range (e.g. 'Sheet1!A:E')"},
+          {"name": "valueInputOption", "in": "query", "required": true, "schema": {"type": "string", "enum": ["RAW", "USER_ENTERED"]}},
+          {"name": "key", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Google API key (env: GOOGLE_API_KEY)"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["values"],
+                "properties": {
+                  "values": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "string"}},
+                    "description": "Nested array of values. Each inner array is a row."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Data appended successfully"}},
+        "security": [{"api_key": ["GOOGLE_API_KEY"]}]
+      }
+    },
+    "/spreadsheets/{spreadsheetId}/values/{range}": {
+      "get": {
+        "summary": "Read data from a Google Sheet",
+        "description": "Read a range of data from a spreadsheet. Returns values as a nested array.",
+        "operationId": "values_get",
+        "parameters": [
+          {"name": "spreadsheetId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "range", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "key", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Google API key"}
+        ],
+        "responses": {"200": {"description": "Spreadsheet data"}}
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "api_key": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "key",
+        "description": "Google API key. Get from console.cloud.google.com → APIs & Services → Credentials. Enable Google Sheets API. Set GOOGLE_API_KEY env var."
+      }
+    }
+  }
+}

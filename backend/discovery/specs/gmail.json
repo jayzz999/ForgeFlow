@@ -1,0 +1,47 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Gmail SMTP",
+    "version": "v1",
+    "description": "Send emails via Gmail SMTP using App Password authentication. Simple and reliable email sending without OAuth complexity."
+  },
+  "servers": [{"url": "smtp://smtp.gmail.com:587"}],
+  "paths": {
+    "/send": {
+      "post": {
+        "summary": "Send an email via Gmail SMTP",
+        "description": "Send an email using Gmail's SMTP server with TLS. Requires a Gmail address and App Password. Supports plain text and HTML emails with CC, BCC, and attachments.",
+        "operationId": "smtp_send",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["to", "subject", "body"],
+                "properties": {
+                  "to": {"type": "string", "description": "Recipient email address"},
+                  "subject": {"type": "string", "description": "Email subject line"},
+                  "body": {"type": "string", "description": "Email body (plain text or HTML)"},
+                  "cc": {"type": "string", "description": "CC recipients (comma-separated)"},
+                  "bcc": {"type": "string", "description": "BCC recipients (comma-separated)"},
+                  "html": {"type": "boolean", "description": "Whether body is HTML (default: false)"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Email sent successfully"}},
+        "security": [{"smtp_auth": ["GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"]}]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "smtp_auth": {
+        "type": "apiKey",
+        "description": "Gmail SMTP authentication using email address and App Password. Set GMAIL_ADDRESS and GMAIL_APP_PASSWORD env vars."
+      }
+    }
+  }
+}

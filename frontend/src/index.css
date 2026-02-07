@@ -1,0 +1,173 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #06060b; }
+::-webkit-scrollbar-thumb { background: #1a1a2e; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #2e2e3e; }
+
+/* ── Glassmorphism ───────────────────────────────────────── */
+.glass {
+  background: rgba(13, 13, 21, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+}
+
+.glass-hover:hover {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+/* ── React Flow custom styles ─────────────────────────────── */
+.react-flow__node {
+  border-radius: 12px !important;
+}
+
+.react-flow__edge-path {
+  stroke: #6366f1 !important;
+  stroke-width: 2 !important;
+}
+
+.react-flow__background {
+  background-color: #06060b !important;
+}
+
+/* ── Node Animations ──────────────────────────────────────── */
+
+/* Task 1: Node appear animation */
+@keyframes node-appear {
+  0% { opacity: 0; transform: scale(0.5) translateY(20px); }
+  60% { opacity: 1; transform: scale(1.05) translateY(-3px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.animate-node-appear {
+  animation: node-appear 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Task 2: Fail flash */
+@keyframes fail-flash {
+  0%, 100% { box-shadow: 0 0 0 rgba(239,68,68,0); border-color: #ef4444; }
+  25% { box-shadow: 0 0 30px rgba(239,68,68,0.8); border-color: #ef4444; }
+  50% { box-shadow: 0 0 5px rgba(239,68,68,0.3); border-color: #ef4444; }
+  75% { box-shadow: 0 0 25px rgba(239,68,68,0.6); border-color: #ef4444; }
+}
+
+.animate-fail-flash {
+  animation: fail-flash 1.5s ease-in-out infinite;
+  background: rgba(239,68,68,0.1) !important;
+}
+
+/* Task 2: Fixing pulse */
+@keyframes fixing-pulse {
+  0%, 100% { box-shadow: 0 0 5px rgba(249,115,22,0.3); }
+  50% { box-shadow: 0 0 20px rgba(249,115,22,0.7); }
+}
+
+.animate-fixing {
+  animation: fixing-pulse 0.8s ease-in-out infinite;
+  border-color: #f97316 !important;
+}
+
+/* Task 2: Success glow */
+@keyframes success-glow {
+  0% { box-shadow: 0 0 0 rgba(34,197,94,0); }
+  50% { box-shadow: 0 0 30px rgba(34,197,94,0.6); }
+  100% { box-shadow: 0 0 8px rgba(34,197,94,0.3); }
+}
+
+.animate-success-glow {
+  animation: success-glow 1s ease-out forwards;
+  border-color: #22c55e !important;
+}
+
+/* Task 6: Running spinner */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 1s linear infinite;
+}
+
+/* ── Pulse glow for active nodes ──────────────────────────── */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 5px rgba(99, 102, 241, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(99, 102, 241, 0.6); }
+}
+
+.node-active {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* ── Slide in ──────────────────────────────────────────────── */
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
+}
+
+/* ── Task 3: Blink cursor ──────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blink 0.8s step-end infinite;
+}
+
+/* ── Task 4: Confetti ──────────────────────────────────────── */
+.confetti-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 60;
+}
+
+.confetti-piece {
+  position: absolute;
+  top: -10px;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  animation: confetti-fall linear forwards;
+}
+
+@keyframes confetti-fall {
+  0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+}
+
+@keyframes celebration-badge {
+  0% { opacity: 0; transform: scale(0.3); }
+  50% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.animate-celebration-badge {
+  animation: celebration-badge 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ── Edge animation ────────────────────────────────────────── */
+@keyframes edge-draw {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: 0; }
+}

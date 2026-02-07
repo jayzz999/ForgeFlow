@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__3db22ca6-db50-4852-a379-3d33c4010924__hf_doc_search",
+      "Bash(chmod:*)",
+      "Bash(pip install:*)",
+      "Bash(npm install:*)",
+      "Bash(python3:*)",
+      "Bash(curl:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)",
+      "Bash(xargs cat:*)",
+      "Bash(npx vite build:*)",
+      "Bash(python:*)",
+      "Bash(npm run build:*)",
+      "Bash(wc:*)",
+      "WebFetch(domain:langchain-ai.github.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:cursor.com)",
+      "WebFetch(domain:newsletter.pragmaticengineer.com)",
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(tee:*)",
+      "Bash(env:*)",
+      "Bash(source:*)",
+      "Bash(echo:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
