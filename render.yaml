@@ -10,24 +10,4 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
-      - key: SLACK_BOT_TOKEN
-        sync: false
-      - key: SLACK_APP_TOKEN
-        sync: false
-      - key: SLACK_SIGNING_SECRET
-        sync: false
-      - key: SLACK_NOTIFICATION_CHANNEL
-        sync: false
-      - key: GMAIL_ADDRESS
-        sync: false
-      - key: GMAIL_APP_PASSWORD
-        sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: GOOGLE_SHEET_ID
-        sync: false
-      - key: DERIV_APP_ID
-        sync: false
-      - key: DERIV_API_TOKEN
-        sync: false
+        value: "gemini-2.5-flash"
