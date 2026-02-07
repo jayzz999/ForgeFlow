@@ -1,10 +1,7 @@
 services:
-  # Backend — FastAPI + WebSocket
   - type: web
     name: forgeflow-api
     runtime: python
-    repo: https://github.com/jayzz999/ForgeFlow.git
-    branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -33,23 +30,4 @@ services:
       - key: DERIV_APP_ID
         sync: false
       - key: DERIV_API_TOKEN
-        sync: false
-
-  # Frontend — Vite Static Site
-  - type: web
-    name: forgeflow-ui
-    runtime: static
-    repo: https://github.com/jayzz999/ForgeFlow.git
-    branch: main
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      - key: VITE_API_URL
-        sync: false
-      - key: VITE_WS_URL
         sync: false
