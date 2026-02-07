@@ -1,0 +1,432 @@
+[
+  {
+    "event_type": "conversation.started",
+    "phase": "collecting",
+    "message": "Analyzing your workflow request...",
+    "data": {},
+    "_delay": 1.0
+  },
+  {
+    "event_type": "conversation.analyzed",
+    "phase": "planning",
+    "message": "Requirements extracted (confidence: 92%)",
+    "data": {
+      "intent": "trading_alert_multi_service",
+      "entities": ["Volatility 75 Index", "Slack", "Google Sheets", "Jira"],
+      "actions_count": 4
+    },
+    "_delay": 1.2
+  },
+  {
+    "event_type": "discovery.started",
+    "phase": "planning",
+    "message": "Discovering relevant APIs...",
+    "data": {},
+    "_delay": 0.8
+  },
+  {
+    "event_type": "api.discovered",
+    "phase": "planning",
+    "message": "Found: deriv_trading → /ticks/subscribe",
+    "data": {
+      "service": "deriv_trading",
+      "endpoint": "/ticks/subscribe",
+      "confidence": 0.94
+    },
+    "_delay": 0.6
+  },
+  {
+    "event_type": "api.discovered",
+    "phase": "planning",
+    "message": "Found: slack → /chat.postMessage",
+    "data": {
+      "service": "slack",
+      "endpoint": "/chat.postMessage",
+      "confidence": 0.97
+    },
+    "_delay": 0.5
+  },
+  {
+    "event_type": "api.discovered",
+    "phase": "planning",
+    "message": "Found: sheets → /spreadsheets/values/append",
+    "data": {
+      "service": "sheets",
+      "endpoint": "/spreadsheets/values/append",
+      "confidence": 0.91
+    },
+    "_delay": 0.5
+  },
+  {
+    "event_type": "api.discovered",
+    "phase": "planning",
+    "message": "Found: jira → /issue/create",
+    "data": {
+      "service": "jira",
+      "endpoint": "/issue/create",
+      "confidence": 0.89
+    },
+    "_delay": 0.5
+  },
+  {
+    "event_type": "discovery.complete",
+    "phase": "planning",
+    "message": "Discovered 4 APIs",
+    "data": {
+      "apis": [
+        {"service": "deriv_trading", "endpoint": "/ticks/subscribe"},
+        {"service": "slack", "endpoint": "/chat.postMessage"},
+        {"service": "sheets", "endpoint": "/spreadsheets/values/append"},
+        {"service": "jira", "endpoint": "/issue/create"}
+      ]
+    },
+    "_delay": 0.8
+  },
+  {
+    "event_type": "planning.started",
+    "phase": "planning",
+    "message": "Building workflow DAG...",
+    "data": {},
+    "_delay": 0.8
+  },
+  {
+    "event_type": "dag.step_added",
+    "phase": "planning",
+    "message": "Step 1: Subscribe to V75 Tick Stream",
+    "data": {
+      "step": {
+        "id": "step_1",
+        "name": "Subscribe to V75 Tick Stream",
+        "depends_on": [],
+        "step_type": "trigger",
+        "description": "Open WebSocket connection to Deriv and subscribe to Volatility 75 Index ticks",
+        "api": {"service": "deriv_trading", "endpoint": "/ticks/subscribe"}
+      },
+      "step_index": 0,
+      "total_steps": 5
+    },
+    "_delay": 0.6
+  },
+  {
+    "event_type": "dag.step_added",
+    "phase": "planning",
+    "message": "Step 2: Calculate Price Movement",
+    "data": {
+      "step": {
+        "id": "step_2",
+        "name": "Calculate Price Movement",
+        "depends_on": ["step_1"],
+        "step_type": "transform",
+        "description": "Track 5-minute price window and calculate percentage change",
+        "api": null
+      },
+      "step_index": 1,
+      "total_steps": 5
+    },
+    "_delay": 0.6
+  },
+  {
+    "event_type": "dag.step_added",
+    "phase": "planning",
+    "message": "Step 3: Alert Slack Channel",
+    "data": {
+      "step": {
+        "id": "step_3",
+        "name": "Alert Slack Channel",
+        "depends_on": ["step_2"],
+        "step_type": "action",
+        "description": "Send formatted alert to #trading-alerts with price details",
+        "api": {"service": "slack", "endpoint": "/chat.postMessage"}
+      },
+      "step_index": 2,
+      "total_steps": 5
+    },
+    "_delay": 0.6
+  },
+  {
+    "event_type": "dag.step_added",
+    "phase": "planning",
+    "message": "Step 4: Log to Google Sheets",
+    "data": {
+      "step": {
+        "id": "step_4",
+        "name": "Log to Google Sheets",
+        "depends_on": ["step_2"],
+        "step_type": "action",
+        "description": "Append price movement data to tracking spreadsheet",
+        "api": {"service": "sheets", "endpoint": "/spreadsheets/values/append"}
+      },
+      "step_index": 3,
+      "total_steps": 5
+    },
+    "_delay": 0.6
+  },
+  {
+    "event_type": "dag.step_added",
+    "phase": "planning",
+    "message": "Step 5: Create Jira Ticket",
+    "data": {
+      "step": {
+        "id": "step_5",
+        "name": "Create Jira Ticket",
+        "depends_on": ["step_2"],
+        "step_type": "action",
+        "description": "Create investigation ticket for significant price movement",
+        "api": {"service": "jira", "endpoint": "/issue/create"}
+      },
+      "step_index": 4,
+      "total_steps": 5
+    },
+    "_delay": 0.6
+  },
+  {
+    "event_type": "dag.planned",
+    "phase": "generating",
+    "message": "Workflow DAG created with 5 steps",
+    "data": {
+      "steps": [
+        {"id": "step_1", "name": "Subscribe to V75 Tick Stream", "depends_on": []},
+        {"id": "step_2", "name": "Calculate Price Movement", "depends_on": ["step_1"]},
+        {"id": "step_3", "name": "Alert Slack Channel", "depends_on": ["step_2"]},
+        {"id": "step_4", "name": "Log to Google Sheets", "depends_on": ["step_2"]},
+        {"id": "step_5", "name": "Create Jira Ticket", "depends_on": ["step_2"]}
+      ],
+      "parallel_possible": [["step_3", "step_4", "step_5"]]
+    },
+    "_delay": 0.8
+  },
+  {
+    "event_type": "codegen.started",
+    "phase": "generating",
+    "message": "Generating executable Python code...",
+    "data": {},
+    "_delay": 1.0
+  },
+  {
+    "event_type": "code.generated",
+    "phase": "testing",
+    "message": "Python code generated (87 lines)",
+    "data": {
+      "lines": 87,
+      "preview": "import asyncio\nimport json\nimport websockets\nimport requests\nfrom datetime import datetime, timedelta\n",
+      "full_code": "\"\"\"ForgeFlow Generated Workflow: V75 Trading Alert Pipeline\nGenerated at: 2026-02-07T14:30:00Z\nWorkflow ID: demo_v75\n\"\"\"\n\nimport asyncio\nimport json\nimport websockets\nimport requests\nfrom datetime import datetime, timedelta\nfrom collections import deque\n\n# ── Configuration ──\nDERIV_APP_ID = \"YOUR_APP_ID\"\nSLACK_WEBHOOK = \"YOUR_SLACK_WEBHOOK\"\nSHEETS_API_URL = \"YOUR_SHEETS_API\"\nJIRA_API_URL = \"YOUR_JIRA_API\"\nJIRA_AUTH = (\"user\", \"token\")\n\nPRICE_WINDOW = timedelta(minutes=5)\nTHRESHOLD_PCT = 2.0\n\n# ── Step 1: Subscribe to V75 Tick Stream ──\nasync def subscribe_v75_ticks():\n    \"\"\"Connect to Deriv WebSocket and subscribe to V75 ticks.\"\"\"\n    url = f\"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}\"\n    async with websockets.connect(url) as ws:\n        await ws.send(json.dumps({\n            \"ticks\": \"R_75\",\n            \"subscribe\": 1\n        }))\n        \n        price_history = deque(maxlen=300)  # ~5 min at 1 tick/sec\n        \n        async for message in ws:\n            data = json.loads(message)\n            if \"tick\" in data:\n                tick = data[\"tick\"]\n                price = float(tick[\"quote\"])\n                timestamp = datetime.fromtimestamp(tick[\"epoch\"])\n                price_history.append((timestamp, price))\n                \n                # Step 2: Calculate price movement\n                pct_change = calculate_movement(price_history)\n                \n                if abs(pct_change) >= THRESHOLD_PCT:\n                    await trigger_alerts(price, pct_change, timestamp)\n                    price_history.clear()\n\n# ── Step 2: Calculate Price Movement ──\ndef calculate_movement(history):\n    \"\"\"Calculate percentage price change over the window.\"\"\"\n    if len(history) < 2:\n        return 0.0\n    oldest_price = history[0][1]\n    newest_price = history[-1][1]\n    return ((newest_price - oldest_price) / oldest_price) * 100\n\n# ── Step 3: Alert Slack Channel ──\nasync def alert_slack(price, pct_change, timestamp):\n    direction = \"surged\" if pct_change > 0 else \"dropped\"\n    emoji = \"\\ud83d\\udcc8\" if pct_change > 0 else \"\\ud83d\\udcc9\"\n    message = f\"{emoji} *V75 Alert:* Price {direction} {abs(pct_change):.2f}% in 5 min\\nCurrent: ${price:.2f} | Time: {timestamp.strftime('%H:%M:%S UTC')}\"\n    requests.post(SLACK_WEBHOOK, json={\"channel\": \"#trading-alerts\", \"text\": message})\n\n# ── Step 4: Log to Google Sheets ──\nasync def log_to_sheets(price, pct_change, timestamp):\n    row = [timestamp.isoformat(), str(price), f\"{pct_change:.2f}%\", \"V75\"]\n    requests.post(SHEETS_API_URL, json={\"values\": [row]})\n\n# ── Step 5: Create Jira Ticket ──\nasync def create_jira_ticket(price, pct_change, timestamp):\n    direction = \"Surge\" if pct_change > 0 else \"Drop\"\n    ticket = {\"fields\": {\"project\": {\"key\": \"TRADE\"}, \"summary\": f\"V75 {direction}: {abs(pct_change):.2f}% movement detected\", \"issuetype\": {\"name\": \"Task\"}, \"description\": f\"Automated alert: V75 moved {pct_change:.2f}% at {timestamp}\"}}\n    requests.post(JIRA_API_URL, json=ticket, auth=JIRA_AUTH)\n\n# ── Orchestrator ──\nasync def trigger_alerts(price, pct_change, timestamp):\n    await asyncio.gather(\n        alert_slack(price, pct_change, timestamp),\n        log_to_sheets(price, pct_change, timestamp),\n        create_jira_ticket(price, pct_change, timestamp),\n    )\n\nif __name__ == \"__main__\":\n    asyncio.run(subscribe_v75_ticks())\n"
+    },
+    "_delay": 0.8
+  },
+  {
+    "event_type": "security.started",
+    "phase": "testing",
+    "message": "Running security review...",
+    "data": {},
+    "_delay": 0.6
+  },
+  {
+    "event_type": "security.complete",
+    "phase": "testing",
+    "message": "Security review: passed",
+    "data": {
+      "safe": true,
+      "findings": [],
+      "risk_level": "low"
+    },
+    "_delay": 0.5
+  },
+  {
+    "event_type": "execution.started",
+    "phase": "testing",
+    "message": "Executing in sandbox (attempt 1)...",
+    "data": {},
+    "_delay": 0.8
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Subscribe to V75 Tick Stream",
+    "data": {"node_id": "step_1", "status": "running"},
+    "_delay": 0.4
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Calculate Price Movement",
+    "data": {"node_id": "step_2", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Alert Slack Channel",
+    "data": {"node_id": "step_3", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Log to Google Sheets",
+    "data": {"node_id": "step_4", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Create Jira Ticket",
+    "data": {"node_id": "step_5", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Execution failed",
+    "data": {"node_id": "all", "status": "failed"},
+    "_delay": 0.8
+  },
+  {
+    "event_type": "execution.failed",
+    "phase": "testing",
+    "message": "Execution failed: ConnectionError — WebSocket connection to wss://ws.derivws.com timed out after 10s",
+    "data": {
+      "stderr": "Traceback (most recent call last):\n  File \"workflow.py\", line 32, in subscribe_v75_ticks\n    async with websockets.connect(url) as ws:\nTimeoutError: [Errno 110] Connection timed out",
+      "error": "ConnectionError: WebSocket connection timed out",
+      "attempt": 1
+    },
+    "_delay": 1.2
+  },
+  {
+    "event_type": "debug.started",
+    "phase": "testing",
+    "message": "Self-debug attempt 1/3...",
+    "data": {},
+    "_delay": 1.0
+  },
+  {
+    "event_type": "debug.diagnosed",
+    "phase": "testing",
+    "message": "Diagnosis: NETWORK_ERROR — Added connection retry with exponential backoff and 15s timeout",
+    "data": {
+      "category": "NETWORK_ERROR",
+      "root_cause": "WebSocket connection to Deriv API has no timeout or retry logic, causing hard failure on first attempt",
+      "fix": "Added exponential backoff retry (3 attempts, 2s/4s/8s delays) and explicit 15-second connection timeout"
+    },
+    "_delay": 1.5
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Applying fix...",
+    "data": {"node_id": "all", "status": "fixing"},
+    "_delay": 1.2
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Fix applied, retrying...",
+    "data": {"node_id": "all", "status": "retrying"},
+    "_delay": 0.8
+  },
+  {
+    "event_type": "execution.started",
+    "phase": "testing",
+    "message": "Executing in sandbox (attempt 2)...",
+    "data": {},
+    "_delay": 0.8
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Subscribe to V75 Tick Stream",
+    "data": {"node_id": "step_1", "status": "running"},
+    "_delay": 0.4
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Completed: Subscribe to V75 Tick Stream",
+    "data": {"node_id": "step_1", "status": "success"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Calculate Price Movement",
+    "data": {"node_id": "step_2", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Completed: Calculate Price Movement",
+    "data": {"node_id": "step_2", "status": "success"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Alert Slack Channel",
+    "data": {"node_id": "step_3", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Completed: Alert Slack Channel",
+    "data": {"node_id": "step_3", "status": "success"},
+    "_delay": 0.2
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Log to Google Sheets",
+    "data": {"node_id": "step_4", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Completed: Log to Google Sheets",
+    "data": {"node_id": "step_4", "status": "success"},
+    "_delay": 0.2
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Running: Create Jira Ticket",
+    "data": {"node_id": "step_5", "status": "running"},
+    "_delay": 0.3
+  },
+  {
+    "event_type": "node.status_changed",
+    "phase": "testing",
+    "message": "Completed: Create Jira Ticket",
+    "data": {"node_id": "step_5", "status": "success"},
+    "_delay": 0.2
+  },
+  {
+    "event_type": "execution.success",
+    "phase": "testing",
+    "message": "Code executed successfully!",
+    "data": {
+      "stdout": "Connected to Deriv WebSocket\nSubscribed to R_75 ticks\nMonitoring V75 price movements...\nAlert triggered: V75 surged 2.34% in 5 min\nSlack alert sent to #trading-alerts\nLogged to Google Sheets\nJira ticket TRADE-1042 created\nWorkflow completed successfully.",
+      "execution_time": 3.2
+    },
+    "_delay": 0.8
+  },
+  {
+    "event_type": "workflow.ready",
+    "phase": "deploying",
+    "message": "Workflow self-debugged (1 fix) and ready to deploy!",
+    "data": {
+      "success": true,
+      "debug_attempts": 1
+    },
+    "_delay": 0.8
+  },
+  {
+    "event_type": "workflow.deployed",
+    "phase": "deployed",
+    "message": "Workflow deployed successfully! ID: demo_v75",
+    "data": {
+      "workflow_id": "demo_v75"
+    },
+    "_delay": 0.5
+  }
+]

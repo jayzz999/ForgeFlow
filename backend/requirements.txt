@@ -1,0 +1,26 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+python-dotenv==1.0.1
+pydantic==2.10.4
+
+# AI/ML
+google-genai>=1.0.0
+langchain==0.3.13
+langchain-google-genai>=2.0.0
+langgraph==0.2.60
+chromadb==0.5.23
+
+# Slack
+slack-bolt==1.21.3
+slack-sdk==3.34.0
+
+# Utilities
+aiosqlite==0.20.0
+httpx==0.28.1
+python-multipart==0.0.20
+
+# Agent Tools (web browsing, HTML parsing)
+beautifulsoup4>=4.12.0
+lxml>=5.0.0

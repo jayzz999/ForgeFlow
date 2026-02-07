@@ -1,0 +1,160 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Slack Web API",
+    "version": "1.0.0",
+    "description": "Slack's Web API for messaging, channels, and user management"
+  },
+  "servers": [{"url": "https://slack.com/api"}],
+  "paths": {
+    "/chat.postMessage": {
+      "post": {
+        "summary": "Send a message to a Slack channel or user",
+        "description": "Post a message to a public channel, private channel, or direct message. Use this to send notifications, alerts, or any text-based communication to a Slack workspace.",
+        "operationId": "chat_postMessage",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["channel", "text"],
+                "properties": {
+                  "channel": {"type": "string", "description": "Channel ID or name (e.g. #general, C1234567890)"},
+                  "text": {"type": "string", "description": "Message text. Supports Slack markdown formatting."},
+                  "blocks": {"type": "array", "description": "Rich layout blocks for the message"},
+                  "thread_ts": {"type": "string", "description": "Timestamp of parent message to reply in thread"},
+                  "unfurl_links": {"type": "boolean", "description": "Whether to unfurl URLs in the message"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message sent successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {"type": "boolean"},
+                    "channel": {"type": "string"},
+                    "ts": {"type": "string", "description": "Timestamp of the sent message"},
+                    "message": {"type": "object"}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [{"bearerAuth": []}]
+      }
+    },
+    "/conversations.create": {
+      "post": {
+        "summary": "Create a new Slack channel",
+        "description": "Create a new public or private channel in the Slack workspace.",
+        "operationId": "conversations_create",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {"type": "string", "description": "Name of the channel to create"},
+                  "is_private": {"type": "boolean", "description": "Whether the channel should be private"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Channel created successfully"}}
+      }
+    },
+    "/conversations.list": {
+      "get": {
+        "summary": "List all channels in a Slack workspace",
+        "description": "Get a list of all public and private channels the bot has access to.",
+        "operationId": "conversations_list",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 100}},
+          {"name": "types", "in": "query", "schema": {"type": "string", "default": "public_channel"}}
+        ],
+        "responses": {"200": {"description": "List of channels"}}
+      }
+    },
+    "/users.list": {
+      "get": {
+        "summary": "List all users in the Slack workspace",
+        "description": "Get a list of all users in the workspace including their display names, emails, and status.",
+        "operationId": "users_list",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 100}}
+        ],
+        "responses": {"200": {"description": "List of users"}}
+      }
+    },
+    "/reactions.add": {
+      "post": {
+        "summary": "Add a reaction emoji to a message",
+        "description": "Add an emoji reaction to a specific message in a channel.",
+        "operationId": "reactions_add",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["channel", "name", "timestamp"],
+                "properties": {
+                  "channel": {"type": "string"},
+                  "name": {"type": "string", "description": "Emoji name without colons (e.g. 'thumbsup')"},
+                  "timestamp": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Reaction added"}}
+      }
+    },
+    "/files.upload": {
+      "post": {
+        "summary": "Upload a file to Slack",
+        "description": "Upload a file to a channel or direct message. Supports images, documents, and other file types.",
+        "operationId": "files_upload",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["channels", "file"],
+                "properties": {
+                  "channels": {"type": "string", "description": "Comma-separated channel IDs"},
+                  "file": {"type": "string", "format": "binary"},
+                  "filename": {"type": "string"},
+                  "title": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "File uploaded"}}
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Slack Bot Token (xoxb-...)"
+      }
+    }
+  }
+}

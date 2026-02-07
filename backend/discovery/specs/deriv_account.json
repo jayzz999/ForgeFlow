@@ -1,0 +1,122 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Deriv Account API",
+    "version": "1.0.0",
+    "description": "Deriv WebSocket API for account management, balance, KYC, and user authentication"
+  },
+  "servers": [{"url": "wss://ws.derivws.com/websockets/v3"}],
+  "paths": {
+    "/authorize": {
+      "post": {
+        "summary": "Authorize a Deriv API session",
+        "description": "Authenticate with the Deriv API using an API token. Required before making any account-related calls.",
+        "operationId": "authorize",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["authorize"],
+                "properties": {
+                  "authorize": {"type": "string", "description": "Deriv API token"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authorization successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authorize": {
+                      "type": "object",
+                      "properties": {
+                        "email": {"type": "string"},
+                        "fullname": {"type": "string"},
+                        "balance": {"type": "number"},
+                        "currency": {"type": "string"},
+                        "loginid": {"type": "string"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/balance": {
+      "post": {
+        "summary": "Get account balance",
+        "description": "Retrieve the current account balance and currency. Can subscribe to continuous balance updates.",
+        "operationId": "balance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["balance"],
+                "properties": {
+                  "balance": {"type": "integer", "enum": [1]},
+                  "subscribe": {"type": "integer", "enum": [1], "description": "Subscribe to balance changes"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Account balance"}}
+      }
+    },
+    "/statement": {
+      "post": {
+        "summary": "Get account transaction statement",
+        "description": "Retrieve recent transactions including trades, deposits, and withdrawals for the account.",
+        "operationId": "statement",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["statement"],
+                "properties": {
+                  "statement": {"type": "integer", "enum": [1]},
+                  "limit": {"type": "integer", "description": "Number of transactions to return"},
+                  "description": {"type": "integer", "enum": [1], "description": "Include description"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Transaction statement"}}
+      }
+    },
+    "/get_settings": {
+      "post": {
+        "summary": "Get user account settings and profile",
+        "description": "Retrieve account settings including name, email, phone, country, and KYC status.",
+        "operationId": "get_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["get_settings"],
+                "properties": {
+                  "get_settings": {"type": "integer", "enum": [1]}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Account settings"}}
+      }
+    }
+  }
+}
