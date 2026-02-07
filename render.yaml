@@ -1,5 +1,4 @@
 services:
-  # Backend — FastAPI + WebSocket
   - type: web
     name: forgeflow-api
     runtime: python
@@ -35,19 +34,14 @@ services:
       - key: DERIV_API_TOKEN
         sync: false
 
-  # Frontend — Vite Static Site
+staticSites:
   - type: web
     name: forgeflow-ui
-    runtime: static
     repo: https://github.com/jayzz999/ForgeFlow.git
     branch: main
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: no-cache
     routes:
       - type: rewrite
         source: /*
