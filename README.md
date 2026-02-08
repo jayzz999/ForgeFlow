@@ -2,7 +2,6 @@
 
 > Describe a business workflow in plain English. ForgeFlow discovers APIs, builds a DAG, generates executable code, self-debugs on failure, and deploys — all autonomously.
 
-**Built for the Deriv AI Talent Sprint Hackathon (Feb 7-8, 2026)**
 
 ---
 
@@ -57,8 +56,6 @@ ForgeFlow generates code that makes **real API calls** — not mock responses. C
 | Slack | Bot Token (OAuth) | Send messages, create channels, invite users, lookup users, upload files |
 | Gmail | SMTP (App Password) | Send emails with plain text or HTML body |
 | Google Sheets | API Key | Read ranges, append rows, update values |
-| Deriv Trading | WebSocket + API Token | Subscribe to ticks, get price proposals, buy contracts, check balance |
-| Deriv Account | WebSocket + API Token | Get account balance, statement, profit table |
 
 The pipeline is credential-aware: services without configured credentials are skipped gracefully with a warning instead of crashing.
 
@@ -231,10 +228,6 @@ GMAIL_APP_PASSWORD=your-app-password
 # Google Sheets (real integration)
 GOOGLE_API_KEY=your-api-key
 GOOGLE_SHEET_ID=your-spreadsheet-id
-
-# Deriv (real integration)
-DERIV_APP_ID=your-app-id
-DERIV_API_TOKEN=your-api-token
 
 # Pipeline config
 GEMINI_MODEL=gemini-2.5-flash
