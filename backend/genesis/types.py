@@ -43,6 +43,26 @@ class Intent(BaseModel):
     edited_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+# ── MCP server specification ───────────────────────────────────────────
+
+class MCPServerSpec(BaseModel):
+    """Describes one MCP server an organism can connect to."""
+    name: str
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    transport: str = "stdio"  # "stdio" | "sse"
+
+
+# ── Skill reference (DNA pointer) ──────────────────────────────────────
+
+class SkillRef(BaseModel):
+    """A pointer into the Genesis skill pool. Lives in organism DNA."""
+    skill_id: str
+    name: str
+    inherited_at: datetime
+
+
 # ── Decision (the atom of causality) ───────────────────────────────────
 
 class Decision(BaseModel):
@@ -117,6 +137,13 @@ class Organism(BaseModel):
     # Learned patterns distilled from experience (real + dreamt).
     # Each pattern is a natural-language summary the LLM can read.
     learned_patterns: list[str] = Field(default_factory=list)
+
+    # Phase 1 — substrate
+    mcp_servers: list[MCPServerSpec] = Field(default_factory=list)
+    inherited_skills: list[SkillRef] = Field(default_factory=list)
+    parent_organisms: list[str] = Field(default_factory=list)
+    fitness_score: float = 0.0
+    distilled_skill_id: Optional[str] = None
 
     # Configurable runtime knobs
     dream_budget_per_cycle: int = 5  # how many speculative branches per idle tick
