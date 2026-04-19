@@ -108,13 +108,33 @@ async def kill_organism(organism_id: str):
     org = store.load_organism(organism_id)
     if not org:
         raise HTTPException(404, f"organism {organism_id} not found")
-    base = Path(store._BASE) / organism_id  # noqa: SLF001 — internal but stable
+
+    # Phase 1 — distill organism's life into a Skill before death
+    from .skills import distill as _distill
+    try:
+        new_skill_id = await _distill.distill(organism_id)
+    except Exception as e:
+        import logging
+        logging.getLogger("genesis.api").warning(
+            f"distillation failed for {organism_id}: {e}"
+        )
+        new_skill_id = None
+
+    base = Path(store._BASE) / organism_id  # noqa: SLF001
     if base.exists():
         shutil.rmtree(base)
     await events.emit("organism.died", {
-        "organism_id": organism_id, "patterns_donated": org.learned_patterns,
+        "organism_id": organism_id,
+        "patterns_donated": org.learned_patterns,
+        "distilled_skill_id": new_skill_id,
     })
-    return {"died": organism_id, "patterns_donated": org.learned_patterns}
+    if new_skill_id:
+        await events.emit("organism.distilled", {
+            "organism_id": organism_id, "skill_id": new_skill_id,
+        })
+    return {"died": organism_id,
+            "patterns_donated": org.learned_patterns,
+            "distilled_skill_id": new_skill_id}
 
 
 @router.post("/organisms/{organism_id}/perceive")

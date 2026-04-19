@@ -35,6 +35,7 @@ EVENT_TYPES = {
     "organism.branch_created",   # counterfactual branch built
     "organism.branch_promoted",  # branch became canonical reality
     "organism.died",             # organism removed
+    "organism.distilled",        # organism's life distilled into a Skill
 }
 
 
