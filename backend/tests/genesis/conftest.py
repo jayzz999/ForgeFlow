@@ -1,10 +1,8 @@
 """Shared fixtures for Genesis tests."""
 from __future__ import annotations
-import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -27,10 +25,23 @@ class FakeLLM:
         self.responses = list(responses)
         self.prompts: list[dict] = []
 
-    async def __call__(self, *, prompt: str, system: str = "",
-                       temperature: float = 0.0, max_tokens: int = 2000) -> str:
-        self.prompts.append({"prompt": prompt, "system": system,
-                             "temperature": temperature})
+    async def __call__(
+        self,
+        prompt: str,
+        system: str = "",
+        model: str | None = None,
+        temperature: float = 0,
+        max_tokens: int = 8000,
+    ) -> str:
+        # Mirrors backend.shared.gemini_client.generate_text exactly so tests
+        # exercise the same call shape production code uses.
+        self.prompts.append({
+            "prompt": prompt,
+            "system": system,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        })
         if not self.responses:
             raise RuntimeError("FakeLLM ran out of canned responses")
         return self.responses.pop(0)
