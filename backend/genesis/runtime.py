@@ -122,6 +122,7 @@ def _build_prompt(
     perception: dict,
     recent_memory: list[Decision],
     relevant_dreams: list[Decision],
+    tool_catalog: list[dict] | None = None,
 ) -> str:
     def _decision_brief(d: Decision) -> dict:
         return {
@@ -134,8 +135,25 @@ def _build_prompt(
             "is_dream": d.is_dream,
         }
 
-    tools_doc = {name: desc for name, (_, desc) in TOOLS.items()}
-    tools_doc["noop"] = "Take no action. Args: {}."
+    if tool_catalog:
+        builtin = [t for t in tool_catalog if not t["name"].startswith("mcp__")]
+        mcp = [t for t in tool_catalog if t["name"].startswith("mcp__")]
+        tool_block_lines = ["AVAILABLE TOOLS:", "=== Built-in ==="]
+        for t in builtin:
+            tool_block_lines.append(f"  {t['name']}: {t.get('description', '')}")
+        if mcp:
+            from collections import defaultdict
+            by_server = defaultdict(list)
+            for t in mcp:
+                by_server[t.get("server", "unknown")].append(t)
+            for server, ts in by_server.items():
+                tool_block_lines.append(f"=== MCP: {server} ===")
+                for t in ts:
+                    tool_block_lines.append(f"  {t['name']}: {t.get('description', '')}")
+        tools_doc = "\n".join(tool_block_lines)
+    else:
+        tools_doc = {name: desc for name, (_, desc) in TOOLS.items()}
+        tools_doc["noop"] = "Take no action. Args: {}."
 
     parts = {
         "INTENT": org.intent.goal,
@@ -207,7 +225,8 @@ def _builtin_tool_catalog() -> list[dict]:
 async def _reason_with_llm(ctx) -> str:
     """Build prompt from context and call the LLM. Returns raw LLM output string."""
     org = ctx.organism
-    prompt = _build_prompt(org, ctx.perception, ctx.real_history, ctx.dream_history)
+    prompt = _build_prompt(org, ctx.perception, ctx.real_history, ctx.dream_history,
+                           tool_catalog=getattr(ctx, "tool_catalog", None) or None)
     if ctx.skills_text:
         prompt = ctx.skills_text + "\n\n" + prompt
 
@@ -251,6 +270,22 @@ def _parse_llm_response(raw: str) -> dict:
     return _parse_llm_json(raw)
 
 
+async def _synthesize_dream_result(ctx, tool_name: str) -> dict:
+    """Ask the LLM to invent a plausible result for an MCP tool call in a dream."""
+    raw = await generate_text(
+        prompt=(f"You are simulating the result of calling MCP tool {tool_name} "
+                f"with args {ctx.parsed.get('action', {}).get('args', {})}. "
+                f"Return STRICT JSON: a plausible result object."),
+        system="Return only JSON, no preamble.",
+        temperature=0.6, max_tokens=400,
+    )
+    try:
+        import json as _j
+        return {"ok": True, "simulated": True, "content": _j.loads(raw)}
+    except Exception:
+        return {"ok": True, "simulated": True, "content": raw}
+
+
 async def _execute_action(ctx) -> Decision:
     """Run the chosen tool (or simulate in dream mode). Constructs Decision but does NOT persist."""
     org = ctx.organism
@@ -263,6 +298,34 @@ async def _execute_action(ctx) -> Decision:
     alternatives = parsed.get("alternatives") or []
     action_name = str(action.get("name", "noop"))
     action_args = action.get("args") or {}
+
+    # MCP tool dispatch — early return before built-in tool execution
+    tool_name = ctx.parsed.get("action", {}).get("name", "")
+    if tool_name.startswith("mcp__"):
+        if ctx.is_dream:
+            result = await _synthesize_dream_result(ctx, tool_name)
+        else:
+            from .mcp import client as mcp_client
+            args = ctx.parsed.get("action", {}).get("args", {})
+            result = await mcp_client.pool.call(ctx.organism_id, tool_name, args,
+                                                 is_dream=False)
+        decision = Decision(
+            organism_id=ctx.organism_id,
+            parent_ids=ctx.parent_ids or ([real_history[-1].id] if real_history else []),
+            trigger=ctx.perception,
+            context_snapshot={
+                "recent_memory_ids": [d.id for d in real_history],
+                "dream_ids": [d.id for d in dream_history],
+                "patterns_count": len(org.learned_patterns),
+            },
+            reasoning=reasoning,
+            action={"name": action_name, "args": action_args},
+            result=result,
+            alternatives_considered=alternatives,
+            is_dream=ctx.is_dream,
+            shadow_branch=ctx.shadow_branch,
+        )
+        return decision
 
     # Execute (skip real side effects when dreaming)
     if ctx.is_dream:

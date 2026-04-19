@@ -94,10 +94,22 @@ async def lifespan(app: FastAPI):
     _genesis_lifecycle.start()
     print("[Genesis] Lifecycle supervisor started")
 
+    # Startup: Genesis MCP pool — register global servers from catalog
+    from backend.genesis.mcp import client as _mcp_client, catalog as _mcp_catalog
+    global_specs = _mcp_catalog.load_global_specs()
+    if global_specs:
+        await _mcp_client.pool.ensure_global(global_specs)
+        print(f"[Genesis] MCP pool: {len(global_specs)} global server(s) registered")
+
     yield
     # Shutdown
     try:
         await _genesis_lifecycle.stop()
+    except Exception:
+        pass
+    try:
+        from backend.genesis.mcp import client as _mcp_client
+        await _mcp_client.pool.shutdown()
     except Exception:
         pass
 
