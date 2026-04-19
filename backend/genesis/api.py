@@ -38,6 +38,11 @@ class SeedRequest(BaseModel):
     constraints: list[str] = []
     forbidden: list[str] = []
     success_signals: list[str] = []
+    # Phase 1 additions
+    inherit_from: list[str] = []
+    inherit_from_organisms: list[str] = []
+    max_inherited_skills: int = 5
+    mcp_servers: list[dict] = []  # raw dicts → MCPServerSpec at construction
 
 
 class PerceiveRequest(BaseModel):
@@ -68,13 +73,26 @@ class PerceptionSourceRequest(BaseModel):
 
 @router.post("/seed")
 async def seed(req: SeedRequest):
+    from .skills import inherit as _inherit
+    from .types import MCPServerSpec
+
+    inherited_refs, parent_orgs = _inherit.resolve_seed_inheritance(
+        inherit_from=req.inherit_from or None,
+        inherit_from_organisms=req.inherit_from_organisms or None,
+        max_inherited_skills=req.max_inherited_skills,
+    )
+    mcp_specs = [MCPServerSpec(**d) for d in (req.mcp_servers or [])]
+
     org = runtime.seed(
-        intent_goal=req.goal,
-        name=req.name,
-        constraints=req.constraints,
-        forbidden=req.forbidden,
+        intent_goal=req.goal, name=req.name,
+        constraints=req.constraints, forbidden=req.forbidden,
         success_signals=req.success_signals,
     )
+    org.inherited_skills = inherited_refs
+    org.parent_organisms = parent_orgs
+    org.mcp_servers = mcp_specs
+    store.save_organism(org)
+
     await events.emit("organism.seeded", {
         "organism_id": org.id,
         "organism": org.model_dump(mode="json"),
@@ -247,3 +265,112 @@ async def list_branches(organism_id: str):
         "branches": [b.model_dump(mode="json")
                      for b in store.list_branches(organism_id)]
     }
+
+
+# ── Skill Library ───────────────────────────────────────────────────────
+
+@router.get("/skills")
+async def list_skills():
+    from .skills import pool as _pool
+    return {"skills": _pool.list_summaries()}
+
+
+@router.get("/skills/{skill_id}")
+async def get_skill(skill_id: str):
+    from .skills import pool as _pool
+    s = _pool.load(skill_id)
+    if not s:
+        raise HTTPException(404, f"skill {skill_id} not found")
+    return {
+        "skill_id": s.skill_id, "name": s.name, "description": s.description,
+        "distilled_at": s.distilled_at.isoformat(),
+        "parent_organisms": s.parent_organisms, "parent_skills": s.parent_skills,
+        "generation": s.generation, "fitness_at_death": s.fitness_at_death,
+        "n_decisions_distilled": s.n_decisions_distilled,
+        "trigger_patterns": s.trigger_patterns, "forbidden_patterns": s.forbidden_patterns,
+        "body": s.body,
+    }
+
+
+@router.get("/skills/{skill_id}/lineage")
+async def get_skill_lineage(skill_id: str):
+    from .skills import pool as _pool
+    seen: set[str] = set()
+    frontier = [skill_id]
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    while frontier:
+        sid = frontier.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        s = _pool.load(sid)
+        if not s:
+            continue
+        nodes.append({"id": sid, "kind": "skill", "name": s.name,
+                      "generation": s.generation,
+                      "fitness_at_death": s.fitness_at_death})
+        for parent in s.parent_skills:
+            edges.append({"source": parent, "target": sid, "kind": "skill_parent"})
+            frontier.append(parent)
+        for org in s.parent_organisms:
+            org_node_id = f"org:{org}"
+            if org_node_id not in seen:
+                seen.add(org_node_id)
+                nodes.append({"id": org_node_id, "kind": "organism", "name": org})
+            edges.append({"source": org_node_id, "target": sid, "kind": "distilled_from"})
+    return {"nodes": nodes, "edges": edges}
+
+
+@router.delete("/skills/{skill_id}")
+async def delete_skill(skill_id: str):
+    from .skills import pool as _pool
+    if not _pool.delete(skill_id):
+        raise HTTPException(404, f"skill {skill_id} not found")
+    return {"deleted": skill_id}
+
+
+# ── MCP endpoints ───────────────────────────────────────────────────────
+
+@router.post("/organisms/{organism_id}/mcp/attach")
+async def attach_mcp(organism_id: str, spec: dict):
+    org = store.load_organism(organism_id)
+    if not org:
+        raise HTTPException(404, f"organism {organism_id} not found")
+    from .types import MCPServerSpec
+    parsed = MCPServerSpec(**spec)
+    org.mcp_servers = [s for s in org.mcp_servers if s.name != parsed.name] + [parsed]
+    store.save_organism(org)
+    from .mcp import client as _mc
+    await _mc.pool.ensure_organism(organism_id, [parsed])
+    return {"ok": True, "mcp_servers": [s.model_dump() for s in org.mcp_servers]}
+
+
+@router.delete("/organisms/{organism_id}/mcp/{server_name}")
+async def detach_mcp(organism_id: str, server_name: str):
+    org = store.load_organism(organism_id)
+    if not org:
+        raise HTTPException(404, f"organism {organism_id} not found")
+    before = len(org.mcp_servers)
+    org.mcp_servers = [s for s in org.mcp_servers if s.name != server_name]
+    if len(org.mcp_servers) == before:
+        raise HTTPException(404, f"server {server_name} not attached")
+    store.save_organism(org)
+    return {"ok": True, "remaining": [s.model_dump() for s in org.mcp_servers]}
+
+
+@router.get("/mcp/global")
+async def mcp_global_status():
+    from .mcp import client as _mc, catalog as _cat
+    return {
+        "configured": [s.model_dump() for s in _cat.load_global_specs()],
+        "runtime": await _mc.pool.status(),
+    }
+
+
+@router.post("/mcp/global/reload")
+async def mcp_global_reload():
+    from .mcp import client as _mc, catalog as _cat
+    specs = _cat.load_global_specs()
+    await _mc.pool.ensure_global(specs)
+    return {"reloaded": len(specs)}
