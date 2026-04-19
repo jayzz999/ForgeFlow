@@ -25,32 +25,53 @@ def _get_available_credentials() -> list[dict]:
     """Check which service credentials are actually configured."""
     creds = []
 
-    # Slack
+    # Slack — also fetch real channel list so generator never hallucinates channel names
     slack_token = os.getenv("SLACK_BOT_TOKEN", "")
+    slack_available = bool(slack_token and slack_token.startswith("xoxb-"))
+    slack_channels = _fetch_slack_channels(slack_token) if slack_available else []
+
     creds.append({
         "service": "Slack",
-        "available": bool(slack_token and slack_token.startswith("xoxb-")),
+        "available": slack_available,
         "env_var": "SLACK_BOT_TOKEN",
-        "note": "Use Bearer token auth" if slack_token else "Not configured",
+        "real_channels": slack_channels,
+        "note": (
+            f"Use Bearer token auth. REAL channels in this workspace: {slack_channels}. "
+            f"ALWAYS use one of these exact channel names (without #). Never invent channel names."
+            if slack_available else "Not configured"
+        ),
     })
 
     # Gmail SMTP
     gmail_addr = os.getenv("GMAIL_ADDRESS", "")
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+    gmail_available = bool(gmail_addr and gmail_pass)
     creds.append({
         "service": "Gmail",
-        "available": bool(gmail_addr and gmail_pass),
+        "available": gmail_available,
         "env_vars": ["GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"],
-        "note": "SMTP via smtplib (NOT Gmail API). Use Python built-in smtplib with GMAIL_ADDRESS and GMAIL_APP_PASSWORD" if gmail_addr else "Not configured — skip gracefully",
+        "note": (
+            f"SMTP via smtplib. Sender address: {gmail_addr}. "
+            "Use Python smtplib with GMAIL_ADDRESS and GMAIL_APP_PASSWORD env vars."
+            if gmail_available else
+            "NOT CONFIGURED — GMAIL_ADDRESS and/or GMAIL_APP_PASSWORD are empty. Skip gracefully with a warning."
+        ),
     })
 
     # Google Sheets
     sheets_key = os.getenv("GOOGLE_API_KEY", "")
+    sheet_id = os.getenv("GOOGLE_SHEET_ID", "")
+    sheets_available = bool(sheets_key and sheet_id)
     creds.append({
         "service": "Google Sheets",
-        "available": bool(sheets_key),
+        "available": sheets_available,
         "env_vars": ["GOOGLE_API_KEY", "GOOGLE_SHEET_ID"],
-        "note": "Sheets API v4 with API key. Sheet must be shared publicly." if sheets_key else "Not configured — skip gracefully",
+        "note": (
+            f"Sheets API v4. Use GOOGLE_API_KEY and GOOGLE_SHEET_ID env vars. "
+            "Sheet must be shared publicly (Anyone with link can edit)."
+            if sheets_available else
+            "NOT CONFIGURED — GOOGLE_API_KEY and/or GOOGLE_SHEET_ID are empty. Skip gracefully with a warning."
+        ),
     })
 
     # Deriv
@@ -59,10 +80,25 @@ def _get_available_credentials() -> list[dict]:
         "service": "Deriv",
         "available": bool(deriv_id and not deriv_id.startswith("your-")),
         "env_vars": ["DERIV_APP_ID", "DERIV_API_TOKEN"],
-        "note": "WebSocket API" if deriv_id else "Not configured",
+        "note": "WebSocket API at wss://ws.derivws.com/websockets/v3" if deriv_id else "Not configured",
     })
 
     return creds
+
+
+def _fetch_slack_channels(token: str) -> list[str]:
+    """Fetch real channel names from the Slack workspace (fast, cached)."""
+    import urllib.request as _req
+    import json as _json
+    try:
+        url = "https://slack.com/api/conversations.list?limit=50&types=public_channel,private_channel"
+        request = _req.Request(url, headers={"Authorization": f"Bearer {token}"})
+        resp = _json.loads(_req.urlopen(request, timeout=5).read())
+        if resp.get("ok"):
+            return [c["name"] for c in resp.get("channels", [])]
+    except Exception:
+        pass
+    return []
 
 
 async def generate_workflow_code(
@@ -155,10 +191,32 @@ async def generate_workflow_code(
             f"Use the SERVICE-SPECIFIC PATTERNS in your instructions as starting points.\n\n"
         )
 
+    # Inject real Slack channels into channel-related step inputs so code uses them
+    slack_cred = next((c for c in available_creds if c["service"] == "Slack"), {})
+    real_channels = slack_cred.get("real_channels", [])
+    if real_channels:
+        prompt += (
+            f"SLACK CHANNELS: The real channels in this workspace are: {real_channels}\n"
+            f"When generating Slack steps, use one of these EXACT channel names.\n"
+            f"Pick the most contextually appropriate channel. Default to '{real_channels[0]}' if unsure.\n\n"
+        )
+
     prompt += (
         f"CRITICAL: Use the EXACT input values from each step's 'inputs' dict in the generated code.\n"
         f"For example, if a step has inputs: {{\"channel\": \"#deriv\", \"text\": \"Hello\"}}, use those EXACT values.\n"
         f"Do NOT substitute default values like '#general' — use what the user specified.\n\n"
+        f"CRITICAL CONTEXT PASSING RULES:\n"
+        f"  - Each step function MUST store its result as context['step_N'] = {{'ok': True, ...data...}}\n"
+        f"    where N is the step number (e.g. step_1, step_2, etc.)\n"
+        f"  - When a step depends on a previous step, check the OUTER result dict, not the inner data:\n"
+        f"    WRONG: prev = context.get('step_1', {{}}).get('outputs', {{}}); if not prev.get('ok'): ...\n"
+        f"    RIGHT: prev_result = context.get('step_1', {{}}); prev = prev_result.get('outputs', prev_result); if not prev_result.get('ok'): ...\n"
+        f"  - If you store data in context['step_N']['outputs'], check context['step_N']['ok'] — not context['step_N']['outputs']['ok']\n\n"
+        f"TOKEN BUDGET REMINDER: This is a LONG workflow. To avoid truncation:\n"
+        f"  1. Generate all {num_steps} step functions completely — do not skip any\n"
+        f"  2. End with a complete main() function that calls all steps\n"
+        f"  3. End with: if __name__ == '__main__': asyncio.run(main())\n"
+        f"  4. If you're running low on space, make functions shorter — but NEVER omit them\n\n"
         f"Generate the workflow code now. Use your tools to browse API docs "
         f"for any step that needs research, and use write_file for additional project files."
     )
@@ -212,18 +270,17 @@ async def generate_workflow_code(
             tool_executor=execute_tool,
             project_dir=workflow_dir,
             model=settings.GEMINI_MODEL,
-            max_tokens=8000,
+            max_tokens=16000,          # Raised: long workflows need room
             on_tool_call=on_tool_call,
         )
     except Exception as e:
         logger.error(f"Tool-calling agent failed, falling back to one-shot: {e}")
-        # Fallback to one-shot generation — use high token limit for full code
         try:
             code = await generate_text(
-                prompt=prompt + "\n\nIMPORTANT: Generate the COMPLETE, FULL workflow.py code with all service integrations. Do NOT abbreviate.",
+                prompt=prompt + "\n\nIMPORTANT: Generate the COMPLETE, FULL workflow.py code. Do NOT abbreviate or truncate.",
                 system=system,
                 model=settings.GEMINI_MODEL,
-                max_tokens=8000,
+                max_tokens=16000,
             )
             extra_files = {}
         except Exception:
@@ -239,7 +296,180 @@ async def generate_workflow_code(
             lines = lines[:-1]
         code = "\n".join(lines)
 
+    # Detect truncation and complete the code if needed
+    code = await _complete_if_truncated(code, dag, prompt, system)
+
+    # Guarantee the code is runnable — add main() + entry point if missing
+    code = _ensure_runnable(code, dag)
+
     return code, extra_files
+
+
+async def _complete_if_truncated(code: str, dag: "WorkflowDAG", original_prompt: str, system: str) -> str:
+    """Detect mid-generation truncation and do a completion pass.
+
+    Signs of truncation:
+    - Last non-empty line is inside a function body (indented)
+    - No `if __name__ == '__main__'` guard
+    - No `asyncio.run(main())` call
+    - Code ends with an unterminated string or open block
+    """
+    import ast as _ast
+
+    stripped = code.rstrip()
+    if not stripped:
+        return code
+
+    last_line = stripped.split("\n")[-1]
+    has_entry = "if __name__" in code and "__main__" in code
+
+    # Fast check: if code ends clean and has entry point, skip completion
+    if has_entry and not last_line.startswith(" ") and not last_line.startswith("\t"):
+        return code
+
+    # Try to parse — if it fails with a non-EOF error it's likely truncated
+    try:
+        _ast.parse(code)
+        # Parsed OK but might still be missing main()
+        if has_entry:
+            return code  # Complete
+        # Fall through to completion
+    except SyntaxError as e:
+        # EOF errors strongly indicate truncation
+        is_truncated = (
+            "EOF" in str(e) or
+            "unexpected" in str(e).lower() or
+            e.lineno == len(code.split("\n"))
+        )
+        if not is_truncated:
+            return code  # Different kind of syntax error — let self-debugger handle
+
+    logger.warning("[CodeGen] Truncation detected — running completion pass")
+
+    completion_prompt = (
+        f"The following Python workflow code was TRUNCATED mid-generation and is incomplete.\n"
+        f"Complete it by:\n"
+        f"1. Finishing any incomplete function (the last function may be cut off mid-body)\n"
+        f"2. Adding ALL remaining step functions that are in the workflow but not yet in the code\n"
+        f"3. Adding a main() async function that calls all steps in order with a shared context dict\n"
+        f"4. Adding `if __name__ == '__main__': asyncio.run(main())`\n\n"
+        f"WORKFLOW STEPS NEEDED:\n"
+        + "\n".join(f"  - {s.name}: {s.description}" for s in dag.steps)
+        + f"\n\nTRUNCATED CODE SO FAR (continue from where it stopped):\n```python\n{code}\n```\n\n"
+        f"OUTPUT: Return ONLY the CONTINUATION — the part that comes AFTER the truncated code. "
+        f"Do NOT repeat what's already there. Start from the incomplete function body or the next function."
+    )
+
+    try:
+        continuation = await generate_text(
+            prompt=completion_prompt,
+            system=system,
+            model=settings.GEMINI_MODEL,
+            max_tokens=8000,
+        )
+        # Strip fences from continuation
+        if continuation.startswith("```"):
+            lines = continuation.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            continuation = "\n".join(lines)
+
+        completed = code.rstrip() + "\n" + continuation.lstrip()
+        logger.info(f"[CodeGen] Completion pass added {len(continuation.split(chr(10)))} lines")
+        return completed
+    except Exception as e:
+        logger.error(f"[CodeGen] Completion pass failed: {e}")
+        return code
+
+
+def _ensure_runnable(code: str, dag: "WorkflowDAG") -> str:
+    """Post-process: make sure the code has a main() function and entry point.
+
+    Gemini sometimes truncates at max_tokens and leaves the code without a main().
+    This detects that and injects a minimal but working entry point.
+    """
+    import ast as _ast
+
+    try:
+        tree = _ast.parse(code)
+    except SyntaxError:
+        return code  # Don't touch broken code — let self-debugger handle it
+
+    # Find all defined async/sync functions
+    all_funcs = [
+        n.name for n in _ast.walk(tree)
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+    ]
+    has_main = "main" in all_funcs
+    has_entry = "__name__" in code and "__main__" in code
+
+    if has_main and has_entry:
+        return code  # Already complete
+
+    # Find step functions (named step_* or execute_*)
+    step_funcs = sorted([
+        n for n in all_funcs
+        if n.startswith("step_") or n.startswith("execute_") or n.startswith("run_")
+    ])
+
+    # If no main(), build one that calls all step functions in order
+    if not has_main:
+        step_calls = ""
+        for fn in step_funcs:
+            # Derive the step key (e.g. "step_1") so we can store result in context
+            import re as _re
+            m = _re.search(r'(step_\d+)', fn)
+            step_key = m.group(1) if m else fn
+            step_calls += (
+                f"    try:\n"
+                f"        result = await {fn}(context)\n"
+                f"        if isinstance(result, dict):\n"
+                f"            context['{step_key}'] = result\n"
+                f"        status = '✅' if (result or {{}}).get('ok', True) else '❌'\n"
+                f"        print(f'  {fn}: {{status}}')\n"
+                f"    except Exception as e:\n"
+                f"        print(f'  {fn}: ❌ {{e}}')\n"
+                f"        context['{step_key}'] = {{'ok': False, 'error': str(e)}}\n"
+                f"\n"
+            )
+
+        if not step_calls:
+            # Fallback: if no step functions found, list all non-private functions
+            candidate_fns = [f for f in all_funcs if not f.startswith("_") and f not in ("main",)]
+            for fn in candidate_fns[:8]:
+                step_calls += f"    # {fn}(context)  — call your step function here\n"
+
+        dag_name = getattr(dag, "name", "Workflow")
+        main_block = f"""
+
+async def main():
+    \"\"\"Execute the {dag_name} workflow.
+    Auto-generated entry point by ForgeFlow.
+    \"\"\"
+    from datetime import datetime
+    print(f"\\n=== Starting: {dag_name} ===")
+    print(f"Time: {{datetime.now().isoformat()}}\\n")
+    context = {{}}
+{step_calls}
+    print("\\n=== Workflow Complete ===")
+    for k, v in context.items():
+        ok = v.get('ok', '?') if isinstance(v, dict) else '?'
+        print(f"  {{k}}: {{'✅' if ok is True else '❌' if ok is False else ok}}")
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+"""
+        code = code.rstrip() + main_block
+
+    elif not has_entry:
+        # Has main() but no entry guard
+        code = code.rstrip() + "\n\nif __name__ == '__main__':\n    import asyncio\n    asyncio.run(main())\n"
+
+    logger.info(f"[CodeGen] Entry point injected — step functions found: {step_funcs}")
+    return code
 
 
 def _build_system_prompt(is_complex: bool) -> str:
@@ -393,6 +623,9 @@ async def sheets_append_row(values: list, sheet_range: str = "Sheet1!A:Z", sprea
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post(url, json={"values": [values]},
                     params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS", "key": GOOGLE_API_KEY})
+                if r.status_code == 401:
+                    logging.warning("[Sheets] 401 Unauthorized — API key cannot write (requires OAuth/service account). Skipping.")
+                    return {"ok": False, "error": "Sheets write requires OAuth — API key is read-only"}
                 r.raise_for_status()
                 return {"ok": True, "updated_rows": r.json().get("updates", {}).get("updatedRows", 0)}
         except Exception as e:
