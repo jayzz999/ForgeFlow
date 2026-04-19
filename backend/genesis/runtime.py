@@ -195,55 +195,66 @@ async def _execute_tool(name: str, args: dict, org: Organism) -> dict:
         return {"ok": False, "error": f"bad args for {name}: {e}"}
 
 
-# ── Public: a single perception → decision cycle ───────────────────────
+# ── Pipeline helpers ───────────────────────────────────────────────────
 
-async def perceive(
-    organism_id: str,
-    perception: dict,
-    *,
-    is_dream: bool = False,
-    shadow_branch: Optional[str] = None,
-    parent_ids: Optional[list[str]] = None,
-    event_callback: Optional[Callable[[str, dict], Awaitable[None]]] = None,
-) -> Decision:
-    """Process one perception event. Reason → act → record.
+def _builtin_tool_catalog() -> list[dict]:
+    """Return the list of tool descriptors the LLM can choose from."""
+    catalog = [{"name": name, "description": desc} for name, (_, desc) in TOOLS.items()]
+    catalog.append({"name": "noop", "description": "Take no action. Args: {}."})
+    return catalog
 
-    Returns the resulting Decision (which has been persisted).
-    """
-    org = store.load_organism(organism_id)
-    if not org:
-        raise ValueError(f"organism {organism_id} not found")
 
-    # Snapshot context the LLM saw (for replay/edit)
-    real_history = [
-        d for d in store.all_decisions(organism_id, include_dreams=False, include_shadows=False)
-    ][-8:]  # last 8 real decisions
+async def _reason_with_llm(ctx) -> str:
+    """Build prompt from context and call the LLM. Returns raw LLM output string."""
+    org = ctx.organism
+    prompt = _build_prompt(org, ctx.perception, ctx.real_history, ctx.dream_history)
 
-    # Naive dream relevance: LLM can compare; for now just take last 5 dreams
-    dream_history = [
-        d for d in store.all_decisions(organism_id, include_dreams=True, include_shadows=False)
-        if d.is_dream
-    ][-5:]
+    if not ctx.is_dream and ctx.event_callback:
+        await ctx.event_callback("organism.perceiving", {
+            "organism_id": ctx.organism_id,
+            "perception": ctx.perception,
+        })
 
-    if not is_dream and event_callback:
-        await event_callback("organism.perceiving", {"organism_id": organism_id, "perception": perception})
-
-    # Update state
-    if not is_dream:
+    # Update state to ACTING
+    if not ctx.is_dream:
         org.state = OrganismState.ACTING
         store.save_organism(org)
 
-    prompt = _build_prompt(org, perception, real_history, dream_history)
-
-    # The actual LLM call — temperature small but nonzero so dreams diverge naturally
     raw = await generate_text(
         prompt=prompt,
         system=SYSTEM_PROMPT,
         model=org.reasoning_model,
-        temperature=0.4 if is_dream else 0.1,
+        temperature=0.4 if ctx.is_dream else 0.1,
         max_tokens=2000,
     )
+
     parsed = _parse_llm_json(raw)
+    reasoning = str(parsed.get("reasoning", ""))[:4000]
+    action = parsed.get("action") or {"name": "noop", "args": {}}
+    action_name = str(action.get("name", "noop"))
+    action_args = action.get("args") or {}
+
+    if ctx.event_callback and not ctx.is_dream:
+        await ctx.event_callback("organism.reasoning", {
+            "organism_id": ctx.organism_id,
+            "reasoning": reasoning,
+            "intended_action": {"name": action_name, "args": action_args},
+        })
+
+    return raw
+
+
+def _parse_llm_response(raw: str) -> dict:
+    """JSON-extract the LLM's raw output."""
+    return _parse_llm_json(raw)
+
+
+async def _execute_action(ctx) -> Decision:
+    """Run the chosen tool (or simulate in dream mode). Constructs Decision but does NOT persist."""
+    org = ctx.organism
+    parsed = ctx.parsed
+    real_history = ctx.real_history
+    dream_history = ctx.dream_history
 
     reasoning = str(parsed.get("reasoning", ""))[:4000]
     action = parsed.get("action") or {"name": "noop", "args": {}}
@@ -251,24 +262,16 @@ async def perceive(
     action_name = str(action.get("name", "noop"))
     action_args = action.get("args") or {}
 
-    if event_callback and not is_dream:
-        await event_callback("organism.reasoning", {
-            "organism_id": organism_id,
-            "reasoning": reasoning,
-            "intended_action": {"name": action_name, "args": action_args},
-        })
-
     # Execute (skip real side effects when dreaming)
-    if is_dream:
+    if ctx.is_dream:
         result = {"ok": True, "simulated": True, "would_have": {"name": action_name, "args": action_args}}
     else:
         result = await _execute_tool(action_name, action_args, org)
 
-    # Persist
     decision = Decision(
-        organism_id=organism_id,
-        parent_ids=parent_ids or ([real_history[-1].id] if real_history else []),
-        trigger=perception,
+        organism_id=ctx.organism_id,
+        parent_ids=ctx.parent_ids or ([real_history[-1].id] if real_history else []),
+        trigger=ctx.perception,
         context_snapshot={
             "recent_memory_ids": [d.id for d in real_history],
             "dream_ids": [d.id for d in dream_history],
@@ -278,26 +281,60 @@ async def perceive(
         action={"name": action_name, "args": action_args},
         result=result,
         alternatives_considered=alternatives,
-        is_dream=is_dream,
-        shadow_branch=shadow_branch,
+        is_dream=ctx.is_dream,
+        shadow_branch=ctx.shadow_branch,
     )
+    return decision
+
+
+async def _persist_and_emit(ctx) -> None:
+    """Save decision, fire events, update organism state, compute fitness."""
+    org = ctx.organism
+    decision = ctx.decision
+
     store.save_decision(decision)
 
     # Update lifecycle state
-    if not is_dream:
+    if not ctx.is_dream:
+        action_name = decision.action.get("name", "noop")
         if action_name == "declare_done":
-            org.state = OrganismState.PERCEIVING  # ready for next event; could become DYING if intent permanent
+            org.state = OrganismState.PERCEIVING
         else:
             org.state = OrganismState.PERCEIVING
         store.save_organism(org)
 
-        if event_callback:
-            await event_callback("organism.acted", {
-                "organism_id": organism_id,
+        if ctx.event_callback:
+            await ctx.event_callback("organism.acted", {
+                "organism_id": ctx.organism_id,
                 "decision": decision.model_dump(mode="json"),
             })
 
-    return decision
+    # Compute fitness placeholder (new in Phase 1)
+    if org and not ctx.is_dream:
+        reals = [d for d in store.all_decisions(org.id) if not d.is_dream and not d.shadow_branch]
+        ok = sum(1 for d in reals if d.result.get("ok") is True)
+        org.fitness_score = ok / max(len(reals), 1)
+        store.save_organism(org)
+
+
+# ── Public: a single perception → decision cycle ───────────────────────
+
+async def perceive(
+    organism_id: str,
+    perception: dict,
+    *,
+    is_dream: bool = False,
+    shadow_branch: Optional[str] = None,
+    parent_ids: Optional[list[str]] = None,
+    event_callback=None,
+) -> Decision:
+    """Public entrypoint. Delegates to the pipeline."""
+    from .pipeline import stages
+    return await stages.run(
+        organism_id, perception,
+        is_dream=is_dream, shadow_branch=shadow_branch,
+        parent_ids=parent_ids, event_callback=event_callback,
+    )
 
 
 # ── Convenience: birth a new organism ──────────────────────────────────
