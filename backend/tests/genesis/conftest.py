@@ -53,4 +53,7 @@ def fake_llm(monkeypatch):
     fake = FakeLLM([])
     from backend.shared import gemini_client
     monkeypatch.setattr(gemini_client, "generate_text", fake)
+    # Also patch the name as imported into runtime (direct import binding)
+    from backend.genesis import runtime as _runtime
+    monkeypatch.setattr(_runtime, "generate_text", fake)
     return fake
