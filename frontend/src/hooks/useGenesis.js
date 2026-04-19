@@ -45,6 +45,9 @@ export function useGenesis() {
         if (e.type === 'organism.seeded') {
           loadOrganisms()
         }
+        if (e.type === 'organism.distilled') {
+          loadSkills()
+        }
       } catch {}
     }
     return () => ws.close()
@@ -69,10 +72,15 @@ export function useGenesis() {
     setBranches(j.branches || [])
   }, [])
 
-  const seed = useCallback(async ({ goal, name, constraints = [], forbidden = [] }) => {
+  const seed = useCallback(async ({ goal, name, constraints = [], forbidden = [],
+                                    inherit_from = [], inherit_from_organisms = [],
+                                    max_inherited_skills = 5,
+                                    mcp_servers = [] }) => {
     const r = await fetch(`${HTTP_BASE}/api/genesis/seed`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ goal, name, constraints, forbidden }),
+      body: JSON.stringify({ goal, name, constraints, forbidden,
+                              inherit_from, inherit_from_organisms,
+                              max_inherited_skills, mcp_servers }),
     })
     const j = await r.json()
     await loadOrganisms()
@@ -126,6 +134,30 @@ export function useGenesis() {
     await loadOrganisms()
   }, [loadOrganisms])
 
+  // ── Skills ─────────────────────────────────────────────────────
+  const [skills, setSkills] = useState([])
+
+  const loadSkills = useCallback(async () => {
+    const r = await fetch(`${HTTP_BASE}/api/genesis/skills`)
+    const j = await r.json()
+    setSkills(j.skills || [])
+  }, [])
+
+  const getSkill = useCallback(async (id) => {
+    const r = await fetch(`${HTTP_BASE}/api/genesis/skills/${id}`)
+    return await r.json()
+  }, [])
+
+  const getSkillLineage = useCallback(async (id) => {
+    const r = await fetch(`${HTTP_BASE}/api/genesis/skills/${id}/lineage`)
+    return await r.json()
+  }, [])
+
+  const deleteSkill = useCallback(async (id) => {
+    await fetch(`${HTTP_BASE}/api/genesis/skills/${id}`, { method: 'DELETE' })
+    await loadSkills()
+  }, [loadSkills])
+
   const killOrganism = useCallback(async (id) => {
     await fetch(`${HTTP_BASE}/api/genesis/organisms/${id}`, { method: 'DELETE' })
     if (activeId === id) setActiveId(null)
@@ -134,6 +166,7 @@ export function useGenesis() {
 
   // initial load
   useEffect(() => { loadOrganisms() }, [loadOrganisms])
+  useEffect(() => { loadSkills() }, [loadSkills])
   useEffect(() => {
     if (activeId) {
       loadCausality(activeId)
@@ -146,10 +179,10 @@ export function useGenesis() {
 
   return {
     // state
-    connected, organisms, activeId, graph, branches, eventLog, acting, dreaming,
+    connected, organisms, activeId, graph, branches, eventLog, acting, dreaming, skills,
     // actions
     setActiveId, seed, perceive, dream, editDecision, promoteBranch, killOrganism,
-    addSource, removeSource,
+    addSource, removeSource, loadSkills, getSkill, getSkillLineage, deleteSkill,
     refreshGraph: () => activeId && loadCausality(activeId),
     refreshOrganisms: loadOrganisms,
   }
