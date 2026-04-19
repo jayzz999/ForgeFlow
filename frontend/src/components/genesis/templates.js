@@ -1,0 +1,46 @@
+export const ORGANISM_TEMPLATES = [
+  {
+    id: 'customer_pulse',
+    icon: '📨',
+    name: 'Customer Pulse',
+    goal: 'Watch every customer email, route urgent ones to humans, draft replies for the rest.',
+    constraints: ['respond within 5 minutes', 'never auto-reply to billing'],
+    forbidden: ['share PII', 'make pricing promises'],
+    suggested_sources: [
+      { kind: 'webhook', type: 'email_received' },
+      { kind: 'interval', type: 'health_check', interval_s: 300 },
+    ],
+    suggested_mcp: ['filesystem', 'fetch'],
+  },
+  {
+    id: 'repo_sentinel',
+    icon: '👁',
+    name: 'Repo Sentinel',
+    goal: 'Watch GitHub events, summarize PRs, flag dependency vulnerabilities.',
+    constraints: ['don\'t spam authors', 'cite line numbers'],
+    forbidden: ['auto-merge', 'auto-close issues'],
+    suggested_sources: [{ kind: 'webhook', type: 'gh_event' }],
+    suggested_mcp: ['github'],
+  },
+  {
+    id: 'market_dreamer',
+    icon: '📈',
+    name: 'Market Dreamer',
+    goal: 'Poll a price feed, dream worst-case scenarios, alert on anomalies.',
+    constraints: ['alert only on >2-sigma moves', 'cool down 10 min after alert'],
+    forbidden: ['execute trades'],
+    suggested_sources: [
+      { kind: 'http_poll', type: 'price_tick', interval_s: 60,
+        url: 'https://api.example.com/price' },
+    ],
+    suggested_mcp: ['fetch'],
+  },
+  {
+    id: 'blank',
+    icon: '🌱',
+    name: 'Blank slate',
+    goal: '',
+    constraints: [], forbidden: [],
+    suggested_sources: [], suggested_mcp: [],
+  },
+]

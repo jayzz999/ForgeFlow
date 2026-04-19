@@ -5,6 +5,8 @@ import CausalGraph from './CausalGraph'
 import DecisionInspector from './DecisionInspector'
 import DreamStream from './DreamStream'
 import SkillLibrary from './SkillLibrary'
+import { ORGANISM_TEMPLATES } from './templates'
+import InheritancePicker from './InheritancePicker'
 
 export default function GenesisPage({ onBack }) {
   const g = useGenesis()
@@ -182,11 +184,10 @@ export default function GenesisPage({ onBack }) {
 
       {showSeedModal && (
         <SeedModal
-          onClose={() => setShowSeedModal(false)}
-          onSeed={async (data) => {
-            await seed(data)
-            setShowSeedModal(false)
-          }}
+          skills={skills}
+          prefillSkillId={seedFromSkillId}
+          onClose={() => { setShowSeedModal(false); setSeedFromSkillId(null) }}
+          onSeed={async (data) => { await seed(data); setShowSeedModal(false); setSeedFromSkillId(null) }}
         />
       )}
 
@@ -205,12 +206,22 @@ export default function GenesisPage({ onBack }) {
 }
 
 // ── Seed Modal ──────────────────────────────────────────────
-function SeedModal({ onClose, onSeed }) {
+function SeedModal({ onClose, onSeed, skills, prefillSkillId }) {
   const [name, setName] = useState('')
   const [goal, setGoal] = useState('')
   const [constraintsText, setConstraintsText] = useState('')
   const [forbiddenText, setForbiddenText] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [template, setTemplate] = useState(null)
+  const [inheritIds, setInheritIds] = useState(prefillSkillId ? [prefillSkillId] : [])
+
+  const applyTemplate = (t) => {
+    setTemplate(t.id)
+    setName(t.id === 'blank' ? '' : t.id)
+    setGoal(t.goal)
+    setConstraintsText((t.constraints || []).join('\n'))
+    setForbiddenText((t.forbidden || []).join('\n'))
+  }
 
   const submit = async () => {
     if (!goal.trim()) return
@@ -221,6 +232,7 @@ function SeedModal({ onClose, onSeed }) {
         goal: goal.trim(),
         constraints: constraintsText.split('\n').map(s => s.trim()).filter(Boolean),
         forbidden: forbiddenText.split('\n').map(s => s.trim()).filter(Boolean),
+        inherit_from: inheritIds,
       })
     } finally { setSubmitting(false) }
   }
@@ -233,6 +245,17 @@ function SeedModal({ onClose, onSeed }) {
           <h2 className="text-lg font-semibold">Seed a new organism</h2>
         </div>
         <div className="space-y-3 text-sm">
+          <div className="flex flex-wrap gap-2 mb-3">
+            {ORGANISM_TEMPLATES.map(t => (
+              <button key={t.id} type="button" onClick={() => applyTemplate(t)}
+                      className={`text-xs px-2 py-1 rounded-full border ${
+                        template===t.id ? 'bg-purple-500/30 border-purple-400 text-purple-100'
+                                        : 'bg-forge-border/40 border-forge-border hover:bg-forge-border/60'
+                      }`}>
+                {t.icon} {t.name}
+              </button>
+            ))}
+          </div>
           <Field label="Name (optional)">
             <input
               className="w-full bg-forge-border/30 rounded p-2 border border-forge-border focus:outline-none focus:border-purple-400"
@@ -264,6 +287,9 @@ function SeedModal({ onClose, onSeed }) {
               onChange={e => setForbiddenText(e.target.value)}
               placeholder="never share PII&#10;never make promises about pricing"
             />
+          </Field>
+          <Field label="Inherit skills (DNA from past organisms)">
+            <InheritancePicker skills={skills} selected={inheritIds} onChange={setInheritIds} />
           </Field>
         </div>
         <div className="flex gap-2 mt-5">
