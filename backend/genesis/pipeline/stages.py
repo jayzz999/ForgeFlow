@@ -52,7 +52,14 @@ async def gather_context(ctx: PipelineContext) -> None:
 
 async def load_capabilities(ctx: PipelineContext) -> None:
     from .. import runtime
-    ctx.tool_catalog = runtime._builtin_tool_catalog()
+    from ..mcp import client as mcp_client
+    catalog = runtime._builtin_tool_catalog()
+    if ctx.organism and ctx.organism.mcp_servers:
+        await mcp_client.pool.ensure_organism(ctx.organism.id, ctx.organism.mcp_servers)
+    mcp_tools = await mcp_client.pool.list_tools(ctx.organism_id) if ctx.organism else []
+    builtin_names = {t["name"] for t in catalog}
+    catalog.extend(t for t in mcp_tools if t["name"] not in builtin_names)
+    ctx.tool_catalog = catalog
 
 
 async def reason(ctx: PipelineContext) -> None:
