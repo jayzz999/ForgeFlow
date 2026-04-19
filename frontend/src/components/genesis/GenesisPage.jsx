@@ -5,6 +5,7 @@ import CausalGraph from './CausalGraph'
 import DecisionInspector from './DecisionInspector'
 import DreamStream from './DreamStream'
 import SkillLibrary from './SkillLibrary'
+import Tour from './Tour'
 import { ORGANISM_TEMPLATES } from './templates'
 import InheritancePicker from './InheritancePicker'
 
@@ -20,6 +21,7 @@ export default function GenesisPage({ onBack }) {
   const [selectedDecision, setSelectedDecision] = useState(null)
   const [showSeedModal, setShowSeedModal] = useState(false)
   const [showLibrary, setShowLibrary] = useState(false)
+  const [tourOpen, setTourOpen] = useState(false)
   const [seedFromSkillId, setSeedFromSkillId] = useState(null)
   const [perceiveJson, setPerceiveJson] = useState('{\n  "type": "test_event",\n  "payload": {}\n}')
   const [perceiveError, setPerceiveError] = useState(null)
@@ -66,6 +68,10 @@ export default function GenesisPage({ onBack }) {
             className="text-xs px-3 py-1.5 rounded-lg bg-forge-border/50 hover:bg-purple-500/20 border border-forge-border"
             title="Browse the Skill pool"
           >📚 Skills ({skills.length})</button>
+          <button
+            onClick={() => setTourOpen(true)}
+            className="text-xs px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/40 border border-purple-500/40 text-purple-200"
+          >▶ Tour</button>
           <button
             onClick={() => setShowSeedModal(true)}
             className="text-xs px-3 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500/20 to-indigo-500/20 hover:from-fuchsia-500/40 hover:to-indigo-500/40 border border-purple-500/40 text-purple-200"
@@ -201,6 +207,8 @@ export default function GenesisPage({ onBack }) {
           onSeedFromSkill={(id) => { setSeedFromSkillId(id); setShowLibrary(false); setShowSeedModal(true) }}
         />
       )}
+
+      <Tour open={tourOpen} onClose={() => setTourOpen(false)} g={g} />
     </div>
   )
 }
