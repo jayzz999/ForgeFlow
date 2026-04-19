@@ -46,7 +46,8 @@ async def gather_context(ctx: PipelineContext) -> None:
     all_decisions = store.all_decisions(ctx.organism_id)
     ctx.real_history = [d for d in all_decisions if not d.is_dream and not d.shadow_branch][-8:]
     ctx.dream_history = [d for d in all_decisions if d.is_dream][-5:]
-    ctx.skills_text = ""
+    from ..skills import inherit
+    ctx.skills_text = inherit.load_skills_text(ctx.organism)
 
 
 async def load_capabilities(ctx: PipelineContext) -> None:
