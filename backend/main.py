@@ -1,11 +1,16 @@
 import asyncio
 import json
+import logging
 import os
 import uuid
 import zipfile
 import io
 from contextlib import asynccontextmanager
 from datetime import datetime
+
+logging.getLogger("slack").setLevel(logging.WARNING)
+logging.getLogger("slack_bolt").setLevel(logging.WARNING)
+logging.getLogger("slack_sdk").setLevel(logging.WARNING)
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +67,17 @@ async def emit_event(event: dict):
             pass
 
 
+async def _safe_start_slack_bot():
+    """Wrap Slack startup so cert / network errors don't dump a stack trace."""
+    try:
+        from backend.slack.bot import start_slack_bot
+        await start_slack_bot()
+    except Exception as e:
+        logging.getLogger("slack").warning(
+            f"Slack bot offline: {type(e).__name__}: {str(e)[:120]}"
+        )
+
+
 # ── App Lifecycle ─────────────────────────────────────────────
 
 @asynccontextmanager
@@ -82,10 +98,12 @@ async def lifespan(app: FastAPI):
         print("[Slack] Bot token not configured — notifications disabled")
 
     # Startup: activate Slack bot (bidirectional — /forge command, DMs)
-    if _slack_app_real:
-        from backend.slack.bot import start_slack_bot
-        asyncio.create_task(start_slack_bot())
-        print("[Slack] Bot started in Socket Mode (bidirectional)")
+    slack_disabled = os.getenv("SLACK_DISABLED", "0") in ("1", "true", "yes")
+    if _slack_app_real and not slack_disabled:
+        asyncio.create_task(_safe_start_slack_bot())
+        print("[Slack] Bot starting in Socket Mode (bidirectional)")
+    elif slack_disabled:
+        print("[Slack] Disabled by SLACK_DISABLED=1")
     else:
         print("[Slack] App token not configured — /forge command disabled")
 
