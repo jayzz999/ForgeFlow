@@ -208,6 +208,8 @@ async def _reason_with_llm(ctx) -> str:
     """Build prompt from context and call the LLM. Returns raw LLM output string."""
     org = ctx.organism
     prompt = _build_prompt(org, ctx.perception, ctx.real_history, ctx.dream_history)
+    if ctx.skills_text:
+        prompt = ctx.skills_text + "\n\n" + prompt
 
     if not ctx.is_dream and ctx.event_callback:
         await ctx.event_callback("organism.perceiving", {
