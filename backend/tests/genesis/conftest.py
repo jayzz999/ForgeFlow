@@ -56,4 +56,7 @@ def fake_llm(monkeypatch):
     # Also patch the name as imported into runtime (direct import binding)
     from backend.genesis import runtime as _runtime
     monkeypatch.setattr(_runtime, "generate_text", fake)
+    # Also patch the name as imported into distill (direct import binding)
+    from backend.genesis.skills import distill as _distill
+    monkeypatch.setattr(_distill, "generate_text", fake)
     return fake
