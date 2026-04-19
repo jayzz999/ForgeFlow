@@ -4,6 +4,7 @@ import OrganismNucleus from './OrganismNucleus'
 import CausalGraph from './CausalGraph'
 import DecisionInspector from './DecisionInspector'
 import DreamStream from './DreamStream'
+import SkillLibrary from './SkillLibrary'
 
 export default function GenesisPage({ onBack }) {
   const g = useGenesis()
@@ -11,10 +12,13 @@ export default function GenesisPage({ onBack }) {
     connected, organisms, activeId, setActiveId, graph, branches, eventLog,
     acting, dreaming, seed, perceive, dream, editDecision, promoteBranch, killOrganism,
     addSource, removeSource,
+    skills, getSkill, getSkillLineage, deleteSkill,
   } = g
 
   const [selectedDecision, setSelectedDecision] = useState(null)
   const [showSeedModal, setShowSeedModal] = useState(false)
+  const [showLibrary, setShowLibrary] = useState(false)
+  const [seedFromSkillId, setSeedFromSkillId] = useState(null)
   const [perceiveJson, setPerceiveJson] = useState('{\n  "type": "test_event",\n  "payload": {}\n}')
   const [perceiveError, setPerceiveError] = useState(null)
 
@@ -55,6 +59,11 @@ export default function GenesisPage({ onBack }) {
             <div className={`w-2 h-2 rounded-full ${connected ? 'bg-forge-success animate-pulse' : 'bg-forge-error'}`} />
             {connected ? 'Connected' : 'Disconnected'}
           </div>
+          <button
+            onClick={() => setShowLibrary(true)}
+            className="text-xs px-3 py-1.5 rounded-lg bg-forge-border/50 hover:bg-purple-500/20 border border-forge-border"
+            title="Browse the Skill pool"
+          >📚 Skills ({skills.length})</button>
           <button
             onClick={() => setShowSeedModal(true)}
             className="text-xs px-3 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500/20 to-indigo-500/20 hover:from-fuchsia-500/40 hover:to-indigo-500/40 border border-purple-500/40 text-purple-200"
@@ -178,6 +187,17 @@ export default function GenesisPage({ onBack }) {
             await seed(data)
             setShowSeedModal(false)
           }}
+        />
+      )}
+
+      {showLibrary && (
+        <SkillLibrary
+          skills={skills}
+          getSkill={getSkill}
+          getSkillLineage={getSkillLineage}
+          deleteSkill={deleteSkill}
+          onClose={() => setShowLibrary(false)}
+          onSeedFromSkill={(id) => { setSeedFromSkillId(id); setShowLibrary(false); setShowSeedModal(true) }}
         />
       )}
     </div>
