@@ -69,6 +69,7 @@ export default function App() {
 
   const [showCode, setShowCode] = useState(true)
   const [mode, setMode] = useState(() => (window.location.hash === '#genesis' ? 'genesis' : 'forge'))
+  const [showCelebration, setShowCelebration] = useState(false)
 
   useEffect(() => {
     const onHash = () => setMode(window.location.hash === '#genesis' ? 'genesis' : 'forge')
@@ -76,12 +77,6 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
-  if (mode === 'genesis') {
-    return <GenesisPage onBack={() => { window.location.hash = ''; setMode('forge') }} />
-  }
-
-  // Celebration state
-  const [showCelebration, setShowCelebration] = useState(false)
   useEffect(() => {
     if (phase === 'deployed') {
       setShowCelebration(true)
@@ -89,6 +84,10 @@ export default function App() {
       return () => clearTimeout(timer)
     }
   }, [phase])
+
+  if (mode === 'genesis') {
+    return <GenesisPage onBack={() => { window.location.hash = ''; setMode('forge') }} />
+  }
 
   const handleDownload = () => {
     if (deployedWorkflowId) {
