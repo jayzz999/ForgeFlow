@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import uuid
 import zipfile
@@ -7,7 +8,11 @@ import io
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+logging.getLogger("slack").setLevel(logging.WARNING)
+logging.getLogger("slack_bolt").setLevel(logging.WARNING)
+logging.getLogger("slack_sdk").setLevel(logging.WARNING)
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -62,6 +67,17 @@ async def emit_event(event: dict):
             pass
 
 
+async def _safe_start_slack_bot():
+    """Wrap Slack startup so cert / network errors don't dump a stack trace."""
+    try:
+        from backend.slack.bot import start_slack_bot
+        await start_slack_bot()
+    except Exception as e:
+        logging.getLogger("slack").warning(
+            f"Slack bot offline: {type(e).__name__}: {str(e)[:120]}"
+        )
+
+
 # ── App Lifecycle ─────────────────────────────────────────────
 
 @asynccontextmanager
@@ -82,15 +98,38 @@ async def lifespan(app: FastAPI):
         print("[Slack] Bot token not configured — notifications disabled")
 
     # Startup: activate Slack bot (bidirectional — /forge command, DMs)
-    if _slack_app_real:
-        from backend.slack.bot import start_slack_bot
-        asyncio.create_task(start_slack_bot())
-        print("[Slack] Bot started in Socket Mode (bidirectional)")
+    slack_disabled = os.getenv("SLACK_DISABLED", "0") in ("1", "true", "yes")
+    if _slack_app_real and not slack_disabled:
+        asyncio.create_task(_safe_start_slack_bot())
+        print("[Slack] Bot starting in Socket Mode (bidirectional)")
+    elif slack_disabled:
+        print("[Slack] Disabled by SLACK_DISABLED=1")
     else:
         print("[Slack] App token not configured — /forge command disabled")
 
+    # Startup: Genesis lifecycle (per-organism heartbeats)
+    from backend.genesis import lifecycle as _genesis_lifecycle
+    _genesis_lifecycle.start()
+    print("[Genesis] Lifecycle supervisor started")
+
+    # Startup: Genesis MCP pool — register global servers from catalog
+    from backend.genesis.mcp import client as _mcp_client, catalog as _mcp_catalog
+    global_specs = _mcp_catalog.load_global_specs()
+    if global_specs:
+        await _mcp_client.pool.ensure_global(global_specs)
+        print(f"[Genesis] MCP pool: {len(global_specs)} global server(s) registered")
+
     yield
     # Shutdown
+    try:
+        await _genesis_lifecycle.stop()
+    except Exception:
+        pass
+    try:
+        from backend.genesis.mcp import client as _mcp_client
+        await _mcp_client.pool.shutdown()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="ForgeFlow", version="1.0.0", lifespan=lifespan)
@@ -102,6 +141,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Genesis (organisms, not workflows) — mounted alongside ForgeFlow v1
+from backend.genesis.api import router as genesis_router  # noqa: E402
+from backend.genesis import events as _genesis_events  # noqa: E402
+app.include_router(genesis_router)
+
+
+async def _genesis_to_ws(event: dict) -> None:
+    """Forward every Genesis event to all connected WebSocket clients."""
+    await manager.broadcast(event)
+
+
+_genesis_events.subscribe(_genesis_to_ws)
 
 
 # ── REST Endpoints ────────────────────────────────────────────
@@ -208,7 +260,7 @@ async def download_workflow(workflow_id: str):
 
     project_path = get_workflow_project_path(workflow_id)
     if not project_path:
-        return {"error": "Workflow not found"}
+        raise HTTPException(status_code=404, detail="Workflow not found")
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
@@ -225,6 +277,134 @@ async def download_workflow(workflow_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename=forgeflow-{workflow_id}.zip"},
     )
+
+
+@app.get("/api/workflows/{workflow_id}/files")
+async def list_workflow_files(workflow_id: str):
+    """List all files in a deployed workflow project."""
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    files = []
+    for root, dirs, fnames in os.walk(project_path):
+        # Skip hidden dirs
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for fname in sorted(fnames):
+            if not fname.startswith("."):
+                rel = os.path.relpath(os.path.join(root, fname), project_path)
+                files.append(rel)
+
+    return {"workflow_id": workflow_id, "files": files}
+
+
+@app.get("/api/workflows/{workflow_id}/files/{file_path:path}")
+async def get_workflow_file(workflow_id: str, file_path: str):
+    """Get the content of a specific file in a deployed workflow."""
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    # Prevent path traversal
+    full_path = os.path.realpath(os.path.join(project_path, file_path))
+    if not full_path.startswith(os.path.realpath(project_path)):
+        raise HTTPException(status_code=403, detail="Invalid path")
+
+    if not os.path.exists(full_path) or not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"content": content, "filename": file_path}
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File is binary and cannot be displayed")
+
+
+@app.post("/api/workflows/{workflow_id}/run")
+async def run_workflow(workflow_id: str):
+    """Execute a deployed workflow with real credentials and return its output.
+
+    Runs `python workflow.py` inside the workflow's project folder, with all
+    environment variables from the current process (Slack token, Gemini key, etc.)
+    injected so real API calls work.
+    """
+    import asyncio as _asyncio
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    workflow_file = os.path.join(project_path, "workflow.py")
+    if not os.path.exists(workflow_file):
+        raise HTTPException(status_code=404, detail="workflow.py not found in project")
+
+    req_file = os.path.join(project_path, "requirements.txt")
+    start = datetime.utcnow()
+
+    try:
+        # Step 1: Install dependencies (silent, best-effort)
+        if os.path.exists(req_file):
+            pip = await _asyncio.create_subprocess_exec(
+                "pip", "install", "-q", "-r", req_file,
+                stdout=_asyncio.subprocess.PIPE,
+                stderr=_asyncio.subprocess.PIPE,
+                cwd=project_path,
+            )
+            try:
+                await _asyncio.wait_for(pip.communicate(), timeout=60)
+            except _asyncio.TimeoutError:
+                pass  # Continue even if pip times out
+
+        # Step 2: Run the workflow with real env vars
+        proc = await _asyncio.create_subprocess_exec(
+            "python", "workflow.py",
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+            cwd=project_path,
+            env={**os.environ},  # Pass all real credentials
+        )
+
+        try:
+            stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
+        except _asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "⏱️ Execution timed out after 120s",
+                "execution_time": 120.0,
+                "return_code": -1,
+            }
+
+        elapsed = (datetime.utcnow() - start).total_seconds()
+        stdout_str = stdout_b.decode("utf-8", errors="replace")
+        stderr_str = stderr_b.decode("utf-8", errors="replace")
+
+        return {
+            "success": proc.returncode == 0,
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+            "execution_time": round(elapsed, 2),
+            "return_code": proc.returncode,
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Runner error: {e}",
+            "execution_time": 0.0,
+            "return_code": -1,
+        }
 
 
 # ── Integrations API ─────────────────────────────────────────
@@ -449,6 +629,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "backend.main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
+        port=int(os.getenv("PORT", "8001")),
         reload=False,  # Disabled — agent write_file triggers WatchFiles reload mid-pipeline
     )

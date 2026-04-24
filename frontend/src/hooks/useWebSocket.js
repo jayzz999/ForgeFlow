@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8001'
 const MAX_RECONNECT_ATTEMPTS = 5
 const PIPELINE_TIMEOUT_MS = 180000 // 3 min timeout — pipeline should complete or clarify by then
 
@@ -18,6 +18,11 @@ export function useWebSocket() {
   const [nodeStatuses, setNodeStatuses] = useState({})
   // Clarification state
   const [clarification, setClarification] = useState(null) // {questions, currentPlan, originalRequest}
+  // Deployed workflow state
+  const [deployedWorkflowId, setDeployedWorkflowId] = useState(null)
+  const [generatedFiles, setGeneratedFiles] = useState([])
+  // Sandbox execution output (from the pipeline run)
+  const [sandboxOutput, setSandboxOutput] = useState(null) // {stdout, stderr, success, execution_time}
   const wsRef = useRef(null)
   const clientId = useRef(`client_${Date.now()}`)
   const reconnectAttempts = useRef(0)
@@ -105,6 +110,32 @@ export function useWebSocket() {
     // Track debug history
     if (event_type === 'debug.diagnosed' && data) {
       setDebugHistory(prev => [...prev, data])
+    }
+
+    // Track sandbox execution output
+    if (event_type === 'execution.success' && data) {
+      setSandboxOutput({
+        stdout: data.stdout || '',
+        stderr: '',
+        success: true,
+        execution_time: data.execution_time || 0,
+        source: 'sandbox',
+      })
+    }
+    if (event_type === 'execution.failed' && data) {
+      setSandboxOutput(prev => ({
+        stdout: prev?.stdout || '',
+        stderr: data.stderr || data.error || '',
+        success: false,
+        execution_time: 0,
+        source: 'sandbox',
+      }))
+    }
+
+    // Track deployed workflow — capture id + file list
+    if (event_type === 'workflow.deployed' && data) {
+      if (data.workflow_id) setDeployedWorkflowId(data.workflow_id)
+      if (data.files) setGeneratedFiles(data.files)
     }
 
     // ── Task 2: Node status changes ──
@@ -224,6 +255,9 @@ export function useWebSocket() {
       setDagSteps([])
       setNodeStatuses({})
       setClarification(null)
+      setDeployedWorkflowId(null)
+      setGeneratedFiles([])
+      setSandboxOutput(null)
       startPipelineTimeout()
     }
   }, [startPipelineTimeout])
@@ -270,6 +304,9 @@ export function useWebSocket() {
       setDagSteps([])
       setNodeStatuses({})
       setClarification(null)
+      setDeployedWorkflowId(null)
+      setGeneratedFiles([])
+      setSandboxOutput(null)
       startPipelineTimeout()
     }
   }, [startPipelineTimeout])
@@ -299,6 +336,9 @@ export function useWebSocket() {
     setDagSteps([])
     setNodeStatuses({})
     setClarification(null)
+    setDeployedWorkflowId(null)
+    setGeneratedFiles([])
+    setSandboxOutput(null)
     clearPipelineTimeout()
   }, [clearPipelineTimeout])
 
@@ -313,6 +353,9 @@ export function useWebSocket() {
     dagSteps,
     nodeStatuses,
     clarification,
+    deployedWorkflowId,
+    generatedFiles,
+    sandboxOutput,
     sendMessage,
     sendClarification,
     skipClarification,

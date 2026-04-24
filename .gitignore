@@ -37,9 +37,24 @@ Thumbs.db
 *.swp
 *.swo
 
+# Local Claude settings (may contain credentials)
+.claude/settings.local.json
+
 # Generated workflows (keep structure, ignore generated files)
 workflows/*/
 
 # Temp
 /tmp/
 *.log
+
+# Genesis runtime data (organisms persist locally; not source)
+organisms/
+!organisms/_skill_pool/.gitkeep
+!organisms/_mcp_global.json
+
+# Playwright MCP cache
+.playwright-mcp/
+
+# Generated reports (built artifacts)
+FORGEFLOW_PROJECT_REPORT.html
+FORGEFLOW_PROJECT_REPORT.pdf
