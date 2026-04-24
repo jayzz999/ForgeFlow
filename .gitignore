@@ -37,6 +37,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Local Claude settings (may contain credentials)
+.claude/settings.local.json
+
 # Generated workflows (keep structure, ignore generated files)
 workflows/*/
 
