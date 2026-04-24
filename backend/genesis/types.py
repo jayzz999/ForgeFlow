@@ -146,8 +146,8 @@ class Organism(BaseModel):
     distilled_skill_id: Optional[str] = None
 
     # Configurable runtime knobs
-    dream_budget_per_cycle: int = 5  # how many speculative branches per idle tick
-    reasoning_model: str = "gemini-2.5-flash"  # cheap; swap to sonnet for serious orgs
+    dream_budget_per_cycle: int = 1  # dreams per idle cycle (set GENESIS_DREAMING=0 to disable entirely)
+    reasoning_model: str = "gemini-2.5-flash"  # ignored when GENESIS_LLM_PROVIDER=groq
 
 
 # ── Counterfactual Branch ──────────────────────────────────────────────

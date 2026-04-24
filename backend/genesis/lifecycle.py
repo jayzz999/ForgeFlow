@@ -203,20 +203,22 @@ async def _heartbeat(organism_id: str) -> None:
                     logger.warning(f"[Heartbeat] {organism_id} source {i} ({kind}) failed: {e}")
                     last_fired[i] = now  # back off till next tick
 
-            # Idle dreaming
-            idle_after = int(os.getenv("GENESIS_IDLE_DREAM_AFTER_S", "120"))
-            last_active = _last_active.get(organism_id, org.born_at)
-            if (now - last_active).total_seconds() > idle_after:
-                try:
-                    logger.info(f"[Heartbeat] {organism_id} idle → dreaming")
-                    await dreams.imagine(
-                        organism_id,
-                        n=org.dream_budget_per_cycle,
-                        event_callback=events.make_callback(),
-                    )
-                    _last_active[organism_id] = datetime.utcnow()
-                except Exception as e:
-                    logger.warning(f"[Heartbeat] {organism_id} dreaming failed: {e}")
+            # Idle dreaming — skipped entirely when GENESIS_DREAMING=0
+            from backend.shared.config import settings as _settings
+            if _settings.GENESIS_DREAMING:
+                idle_after = _settings.GENESIS_IDLE_DREAM_AFTER_S
+                last_active = _last_active.get(organism_id, org.born_at)
+                if (now - last_active).total_seconds() > idle_after:
+                    try:
+                        logger.info(f"[Heartbeat] {organism_id} idle → dreaming")
+                        await dreams.imagine(
+                            organism_id,
+                            n=org.dream_budget_per_cycle,
+                            event_callback=events.make_callback(),
+                        )
+                        _last_active[organism_id] = datetime.utcnow()
+                    except Exception as e:
+                        logger.warning(f"[Heartbeat] {organism_id} dreaming failed: {e}")
 
             await asyncio.sleep(2)
 

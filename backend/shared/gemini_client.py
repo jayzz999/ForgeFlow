@@ -19,8 +19,39 @@ from backend.shared.config import settings
 logger = logging.getLogger("forgeflow.gemini")
 
 _client: genai.Client | None = None
+_groq_client = None  # lazy-initialised when provider=groq
 
 MAX_TOOL_ROUNDS = 15  # Safety limit for tool-calling loops
+
+
+def _get_groq_client():
+    """Lazy singleton for the Groq async client."""
+    global _groq_client
+    if _groq_client is None:
+        from groq import AsyncGroq
+        _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+    return _groq_client
+
+
+async def _groq_generate_text(
+    prompt: str,
+    system: str,
+    model: str | None = None,
+    temperature: float = 0,
+    max_tokens: int = 8000,
+) -> str:
+    """Call Groq (Llama 3.3 70B) — free tier, OpenAI-compatible."""
+    client = _get_groq_client()
+    response = await client.chat.completions.create(
+        model=model or settings.GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content or ""
 
 
 def get_client() -> genai.Client:
@@ -65,14 +96,20 @@ async def generate_json(
 
 async def generate_text(
     prompt: str,
-    system: str,
+    system: str = "",
     model: str | None = None,
     temperature: float = 0,
     max_tokens: int = 8000,
 ) -> str:
-    """Call Gemini and return plain text."""
-    client = get_client()
+    """Call the configured LLM and return plain text.
 
+    Routes to Groq (free, Llama 3.3 70B) when GENESIS_LLM_PROVIDER=groq,
+    otherwise uses Gemini (default, for demo/prod).
+    """
+    if settings.GENESIS_LLM_PROVIDER == "groq":
+        return await _groq_generate_text(prompt, system, model, temperature, max_tokens)
+
+    client = get_client()
     response = await client.aio.models.generate_content(
         model=model or settings.GEMINI_MODEL,
         contents=prompt,
@@ -82,7 +119,6 @@ async def generate_text(
             max_output_tokens=max_tokens,
         ),
     )
-
     return response.text or ""
 
 
