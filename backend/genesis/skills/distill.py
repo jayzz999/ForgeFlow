@@ -56,18 +56,24 @@ async def distill(organism_id: str) -> Optional[str]:
                 "fitness_at_death": s.fitness_at_death,
             })
 
+    # Truncate decision payloads to fit in small LLM context windows
+    compact_decisions = []
+    for d in decisions[-8:]:  # last 8 decisions max
+        result_ok = d.result.get("ok") if isinstance(d.result, dict) else None
+        compact_decisions.append({
+            "action": d.action.get("name", "?"),
+            "args_summary": str(d.action.get("args", {}))[:100],
+            "reasoning": d.reasoning[:200],
+            "result_ok": result_ok,
+        })
+
     user_payload = {
-        "intent": {
-            "goal": org.intent.goal,
-            "constraints": org.intent.constraints,
-            "forbidden": org.intent.forbidden,
-        },
+        "intent": org.intent.goal[:300],
+        "constraints": org.intent.constraints[:3],
+        "forbidden": org.intent.forbidden[:3],
         "fitness_score": org.fitness_score,
-        "decisions": [
-            {"trigger": d.trigger, "reasoning": d.reasoning,
-             "action": d.action, "result": d.result}
-            for d in decisions
-        ],
+        "decision_count": len(decisions),
+        "decisions": compact_decisions,
         "inherited_skills_used": inherited_skill_summaries,
     }
     raw = await generate_text(
@@ -78,8 +84,32 @@ async def distill(organism_id: str) -> Optional[str]:
     )
     parsed = _parse_distillation(raw)
     if not parsed:
-        logger.warning(f"[distill] {organism_id} got unparseable LLM response, skipping")
-        return None
+        logger.warning(f"[distill] {organism_id} LLM response unparseable, using heuristic fallback")
+        # Heuristic fallback — build a basic Skill from raw decision data
+        actions_used = list({d.action.get("name", "?") for d in decisions})
+        triggers_seen = list({d.trigger.get("type", "?") for d in decisions})
+        ok_count = sum(1 for d in decisions if isinstance(d.result, dict) and d.result.get("ok"))
+        fail_count = len(decisions) - ok_count
+        parsed = {
+            "name": f"organism_{organism_id[:8]}_skill",
+            "description": f"Distilled from {len(decisions)} decisions (goal: {org.intent.goal[:60]}...)",
+            "trigger_patterns": triggers_seen,
+            "forbidden_patterns": list(org.intent.forbidden[:3]),
+            "body": (
+                f"# What this knows\n"
+                f"- Intent: {org.intent.goal[:200]}\n"
+                f"- Tools used: {', '.join(actions_used)}\n\n"
+                f"# What worked\n"
+                f"- {ok_count}/{len(decisions)} decisions succeeded\n"
+                f"- Actions that worked: {', '.join(a for a in actions_used if a != 'noop')}\n\n"
+                f"# What failed\n"
+                f"- {fail_count}/{len(decisions)} decisions failed\n"
+                f"- Constraints: {', '.join(org.intent.constraints[:3])}\n\n"
+                f"# Patterns observed\n"
+                f"- Trigger types: {', '.join(triggers_seen)}\n"
+                f"- Learned patterns: {', '.join(org.learned_patterns[:5]) if org.learned_patterns else 'none'}\n"
+            ),
+        }
 
     parent_skills = [r.skill_id for r in org.inherited_skills]
     parent_gens = [pool.load(sid).generation for sid in parent_skills if pool.load(sid)]
@@ -103,6 +133,18 @@ async def distill(organism_id: str) -> Optional[str]:
     org.distilled_skill_id = skill.skill_id
     store.save_organism(org)
     logger.info(f"[distill] {organism_id} → {skill.skill_id} (gen {generation})")
+
+    # Phase 4: Embodiment — compile the skill into an executable MCP server
+    try:
+        from . import compiler
+        compiled_path = await compiler.compile_skill(skill, decisions)
+        if compiled_path:
+            logger.info(f"[distill] Phase 4: Compiled {skill.skill_id} → {compiled_path}")
+        else:
+            logger.warning(f"[distill] Phase 4: Compilation failed for {skill.skill_id} (non-fatal)")
+    except Exception as e:
+        logger.warning(f"[distill] Phase 4: Compilation error for {skill.skill_id}: {e} (non-fatal)")
+
     return skill.skill_id
 
 

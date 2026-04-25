@@ -31,7 +31,7 @@ async def test_full_lifecycle_then_inheritance(tmp_storage, fake_llm, monkeypatc
     assert skill_id is not None
 
     # ── Round 2: child inherits ──────────────────────────────────
-    refs, parents = inherit.resolve_seed_inheritance(inherit_from=[skill_id])
+    refs, parents, compiled_specs = inherit.resolve_seed_inheritance(inherit_from=[skill_id])
     assert len(refs) == 1
     assert refs[0].skill_id == skill_id
 

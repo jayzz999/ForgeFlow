@@ -44,7 +44,22 @@ def resolve_seed_inheritance(
     now = datetime.utcnow()
     refs = [SkillRef(skill_id=s.skill_id, name=s.name, inherited_at=now)
             for s in skills]
-    return refs, sorted(parent_orgs)
+
+    # Phase 4: Embodiment — collect compiled skill MCP servers
+    compiled_mcp_specs = []
+    from . import compiler
+    from ..types import MCPServerSpec
+    import sys
+    for s in skills:
+        compiled_path = compiler.get_compiled_path(s.skill_id)
+        if compiled_path:
+            compiled_mcp_specs.append(MCPServerSpec(
+                name=f"compiled_{s.name}",
+                command=sys.executable,
+                args=[compiled_path],
+            ))
+
+    return refs, sorted(parent_orgs), compiled_mcp_specs
 
 
 def load_skills_text(organism: Organism) -> str:
