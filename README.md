@@ -168,7 +168,7 @@ ForgeFlow/
       engine.py           # Intent extraction + clarification logic
     discovery/
       api_selector.py     # ChromaDB vector search for API matching
-      specs/              # API specifications (Slack, Gmail, Sheets, Deriv)
+      specs/              # API specifications (Slack, Gmail, Sheets, Financial)
     planner/
       dag_builder.py      # Workflow DAG construction
       data_mapper.py      # Inter-step data flow mapping

@@ -324,6 +324,7 @@ function SourceRail({ organism, onAdd, onRemove }) {
   const submit = async () => {
     const src = { kind, type, interval_s: Number(interval) || 60 }
     if (kind === 'http_poll') src.url = url
+    if (kind === 'slack') src.channel = url
     await onAdd(src)
     setOpen(false); setUrl(''); setType('tick'); setKind('interval'); setInterval(60)
   }
@@ -352,6 +353,7 @@ function SourceRail({ organism, onAdd, onRemove }) {
                 {s.kind === 'webhook' && s.token && `POST /api/genesis/webhook/${s.token}`}
                 {s.kind === 'interval' && `every ${s.interval_s}s`}
                 {s.kind === 'http_poll' && ` · every ${s.interval_s}s`}
+                {s.kind === 'slack' && `Listening to: ${s.channel || '*'}`}
               </div>
             </div>
             <button
@@ -374,6 +376,7 @@ function SourceRail({ organism, onAdd, onRemove }) {
             <option value="interval">⏱ interval (heartbeat tick)</option>
             <option value="http_poll">🌐 http_poll (poll a URL)</option>
             <option value="webhook">📬 webhook (token route)</option>
+            <option value="slack">💬 slack (listen to channel/DMs)</option>
           </select>
           <input
             value={type}
@@ -389,7 +392,15 @@ function SourceRail({ organism, onAdd, onRemove }) {
               className="w-full bg-forge-border/30 rounded p-1.5 border border-forge-border focus:outline-none focus:border-purple-400 font-mono"
             />
           )}
-          {kind !== 'webhook' && (
+          {kind === 'slack' && (
+            <input
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              placeholder="channel id (e.g. #general or *)"
+              className="w-full bg-forge-border/30 rounded p-1.5 border border-forge-border focus:outline-none focus:border-purple-400 font-mono"
+            />
+          )}
+          {(kind !== 'webhook' && kind !== 'slack') && (
             <input
               type="number" min={5}
               value={interval}

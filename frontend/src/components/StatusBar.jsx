@@ -55,7 +55,7 @@ export default function StatusBar({ phase, discoveredApis, debugHistory, events 
 
       {/* Branding */}
       <div className="text-forge-muted">
-        ForgeFlow v1.0 — Deriv AI Talent Sprint
+        ForgeFlow v1.0 — AI Talent Sprint
       </div>
     </div>
   )

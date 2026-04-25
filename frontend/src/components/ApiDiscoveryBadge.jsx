@@ -5,7 +5,7 @@ const SERVICE_COLORS = {
   'Gmail': { bg: 'bg-red-500/20', text: 'text-red-300', border: 'border-red-500/30' },
   'Jira': { bg: 'bg-blue-500/20', text: 'text-blue-300', border: 'border-blue-500/30' },
   'Google Sheets': { bg: 'bg-green-500/20', text: 'text-green-300', border: 'border-green-500/30' },
-  'Deriv': { bg: 'bg-orange-500/20', text: 'text-orange-300', border: 'border-orange-500/30' },
+
 }
 
 const DEFAULT_COLORS = { bg: 'bg-indigo-500/20', text: 'text-indigo-300', border: 'border-indigo-500/30' }

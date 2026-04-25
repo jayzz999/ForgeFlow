@@ -111,7 +111,7 @@ export default function App() {
             AI Workflow Generator
           </span>
           <span className="text-[10px] text-indigo-400/60 hidden sm:inline">
-            Built for Deriv AI Talent Sprint
+            Built for AI Talent Sprint
           </span>
         </div>
         <div className="flex items-center gap-3">
