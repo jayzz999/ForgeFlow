@@ -42,6 +42,10 @@ async def _groq_generate_text(
 ) -> str:
     """Call Groq (Llama 3.3 70B) — free tier, OpenAI-compatible."""
     client = _get_groq_client()
+    # Ensure we don't send gemini models to the groq API
+    if model and "gemini" in model:
+        model = settings.GROQ_MODEL
+        
     response = await client.chat.completions.create(
         model=model or settings.GROQ_MODEL,
         messages=[
@@ -213,9 +217,14 @@ async def generate_with_tools(
             # Execute the tool
             result = await tool_executor(tool_name, tool_args, project_dir)
 
-            # Track written files
+            # Track written files — normalize and reject path-traversal attempts
             if tool_name == "write_file" and tool_args.get("path"):
-                extra_files[tool_args["path"]] = tool_args.get("content", "")
+                from backend.shared.path_security import normalize_relative_path
+                try:
+                    safe_path = normalize_relative_path(tool_args["path"])
+                    extra_files[safe_path] = tool_args.get("content", "")
+                except ValueError:
+                    logger.warning(f"[Agent] Rejected unsafe write_file path: {tool_args['path']!r}")
 
             # Notify UI
             if on_tool_call:

@@ -57,6 +57,67 @@ async def _tool_send_slack(channel: str, text: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+async def _tool_fetch_web_page(url: str) -> dict:
+    try:
+        from backend.tools.executor import _fetch_web_page
+        content = await _fetch_web_page({"url": url})
+        return {"ok": True, "content": content[:4000]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+async def _tool_forge_mcp_server(name: str, description: str, org_id: str = "") -> dict:
+    try:
+        from backend.shared.gemini_client import generate_text
+        from backend.shared.config import settings
+        import os
+        from backend.genesis import store
+        from backend.genesis.types import MCPServerSpec
+        from backend.genesis.mcp.client import pool
+        
+        prompt = f"""Write a Python MCP server using `fastmcp` (from mcp.server.fastmcp import FastMCP) based on this description:
+{description}
+
+The server name should be "{name}".
+Use httpx for any API calls.
+Return ONLY valid Python code without markdown fences.
+"""
+        code = await generate_text(prompt=prompt, system="You are an expert Python MCP server developer.", model=settings.GEMINI_MODEL, max_tokens=4000)
+        
+        import re
+        match = re.search(r"```(?:python)?\s*(.*?)\s*```", code, re.DOTALL)
+        if match:
+            code = match.group(1)
+        else:
+            # Fallback if no markdown blocks are found but trailing text exists
+            code = code.split("```")[0].strip()
+            
+        org = store.load_organism(org_id)
+        if not org:
+            return {"ok": False, "error": "Organism not found"}
+            
+        org_dir = store._organism_dir(org.id)
+        mcps_dir = org_dir / "mcps"
+        os.makedirs(mcps_dir, exist_ok=True)
+        file_path = str(mcps_dir / f"{name}.py")
+        
+        with open(file_path, "w") as f:
+            f.write(code)
+        os.chmod(file_path, 0o755)
+        
+        # Determine the Python executable to use
+        import sys
+        python_exe = sys.executable
+        
+        spec = MCPServerSpec(name=name, command=python_exe, args=[file_path])
+        org.mcp_servers.append(spec)
+        store.save_organism(org)
+        
+        await pool.ensure_organism(org.id, [spec])
+        
+        return {"ok": True, "path": file_path, "message": f"MCP server '{name}' successfully created, attached to your DNA, and loaded into your available tools!"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 
 async def _tool_http_request(method: str, url: str, headers: dict | None = None,
                              body: dict | None = None) -> dict:
@@ -75,9 +136,11 @@ async def _tool_http_request(method: str, url: str, headers: dict | None = None,
 
 # Map of tool name → (callable, description for LLM prompt)
 TOOLS: dict[str, tuple[Callable[..., Awaitable[dict]], str]] = {
-    "send_slack": (_tool_send_slack, "Post a message to a Slack channel. Args: channel (str), text (str)."),
+    "send_slack": (_tool_send_slack, "Post a message to a Slack channel or User. Args: channel (str, can be channel ID like #general or User ID for DM), text (str)."),
     "http_request": (_tool_http_request,
                      "Make an HTTP request. Args: method (str), url (str), headers (dict, optional), body (dict, optional)."),
+    "fetch_web_page": (_tool_fetch_web_page, "Fetch and read the text content of a web page. Args: url (str)."),
+    "forge_mcp_server": (_tool_forge_mcp_server, "Autonomously write and deploy a new MCP Python server to give yourself new capabilities. Args: name (str, no spaces), description (str, detailed explanation of what APIs it connects to and what tools it should expose)."),
     "remember": (None, "Record a learned pattern. Args: pattern (str). Use sparingly — only durable insights."),
     "declare_done": (None, "Signal the intent has been satisfied for this trigger. Args: summary (str)."),
 }
@@ -114,6 +177,17 @@ Rules:
   - If the intent is satisfied for this perception, action.name = "declare_done".
   - If you need no action (purely observational), action.name = "noop".
   - Never invent tool names. Only use tools listed in AVAILABLE TOOLS.
+
+CRITICAL — ANTI-REPETITION:
+  - BEFORE choosing an action, carefully review RECENT MEMORY.
+  - If a previous decision already used a tool AND its result was {"ok": true},
+    that step is DONE. Do NOT repeat it. Move on to the NEXT step of your plan.
+  - Think step-by-step: What have I already accomplished? What is the next
+    logical step to fulfill my intent?
+  - Your intent may require MULTIPLE steps. Execute them ONE AT A TIME, in order.
+    Each perception cycle should advance to the NEXT step.
+  - If you see MCP tools (prefixed mcp__) in AVAILABLE TOOLS, prefer using
+    those over forge_mcp_server — the server is already running.
 """
 
 
@@ -207,6 +281,11 @@ async def _execute_tool(name: str, args: dict, org: Organism) -> dict:
     fn, _ = TOOLS[name]
     if fn is None:
         return {"ok": False, "error": f"tool {name} has no implementation"}
+        
+    # Inject organism ID into meta-tools that need it
+    if name == "forge_mcp_server":
+        args["org_id"] = org.id
+        
     try:
         return await fn(**args)
     except TypeError as e:

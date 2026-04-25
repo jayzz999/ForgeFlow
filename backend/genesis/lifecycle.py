@@ -253,6 +253,12 @@ async def _fire_http_poll(organism_id: str, src: dict) -> None:
         body: Any = r.json()
     except Exception:
         body = r.text
+        
+    # Truncate string representations to prevent context bloat
+    body_str = str(body)
+    if len(body_str) > 4000:
+        body = body_str[:4000] + "... (truncated)"
+        
     perception = {
         "type": src.get("type", "http_poll"),
         "source": "http_poll",

@@ -76,12 +76,14 @@ async def seed(req: SeedRequest):
     from .skills import inherit as _inherit
     from .types import MCPServerSpec
 
-    inherited_refs, parent_orgs = _inherit.resolve_seed_inheritance(
+    inherited_refs, parent_orgs, compiled_mcp_specs = _inherit.resolve_seed_inheritance(
         inherit_from=req.inherit_from or None,
         inherit_from_organisms=req.inherit_from_organisms or None,
         max_inherited_skills=req.max_inherited_skills,
     )
     mcp_specs = [MCPServerSpec(**d) for d in (req.mcp_servers or [])]
+    # Phase 4: Merge compiled skill MCP servers
+    mcp_specs.extend(compiled_mcp_specs)
 
     org = runtime.seed(
         intent_goal=req.goal, name=req.name,
@@ -374,3 +376,41 @@ async def mcp_global_reload():
     specs = _cat.load_global_specs()
     await _mc.pool.ensure_global(specs)
     return {"reloaded": len(specs)}
+
+
+# ── Phase 4: Embodiment — Compiled Skills ──────────────────────────────
+
+@router.get("/compiled")
+async def list_compiled_skills():
+    """List all compiled skill MCP servers."""
+    from .skills import compiler
+    return {"compiled_skills": compiler.list_compiled()}
+
+
+@router.post("/skills/{skill_id}/compile")
+async def compile_skill(skill_id: str):
+    """Compile a narrative skill into an executable MCP server."""
+    from .skills import pool as _pool, compiler
+    skill = _pool.load(skill_id)
+    if not skill:
+        raise HTTPException(404, f"skill {skill_id} not found")
+    compiled_path = await compiler.compile_skill(skill)
+    if not compiled_path:
+        raise HTTPException(500, "compilation failed")
+    return {"ok": True, "skill_id": skill_id, "compiled_path": compiled_path}
+
+
+@router.get("/sandbox/status")
+async def sandbox_status():
+    """Get health status of all sandboxed compiled skill processes."""
+    from .skills.sandbox import sandbox_manager
+    return sandbox_manager.status()
+
+
+@router.post("/sandbox/health-check")
+async def sandbox_health_check():
+    """Run health check on all sandboxed processes, auto-restart if needed."""
+    from .skills.sandbox import sandbox_manager
+    results = await sandbox_manager.health_check()
+    return {"results": results}
+

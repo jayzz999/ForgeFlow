@@ -198,6 +198,7 @@ async def handle_message(event, say):
     text = event.get("text", "").strip()
     user = event.get("user", "")
     subtype = event.get("subtype", "")
+    channel = event.get("channel", "")
 
     print(f"[Slack Event] message received — channel_type={channel_type}, user={user}, text={text[:50]}")
 
@@ -208,27 +209,54 @@ async def handle_message(event, say):
     if not text:
         return
 
-    # Respond to DMs
-    if channel_type == "im":
-        # Check if it's a workflow request
+    from backend.genesis import store, runtime, events
+
+    # Route to any Genesis organism that has a "slack" perception source listening to this channel or universally
+    organisms = store.list_organisms()
+    routed_to_genesis = False
+    
+    for org in organisms:
+        for src in (org.perception_sources or []):
+            if src.get("kind") == "slack":
+                # Check if listening to specific channel, or universally
+                listen_channel = src.get("channel")
+                if not listen_channel or listen_channel == channel or listen_channel == "*":
+                    # Send it!
+                    perception = {
+                        "type": "slack_message",
+                        "source": "slack",
+                        "channel": channel,
+                        "channel_type": channel_type,
+                        "user": user,
+                        "text": text,
+                        "ts": event.get("ts")
+                    }
+                    asyncio.create_task(
+                        runtime.perceive(org.id, perception, event_callback=events.make_callback())
+                    )
+                    routed_to_genesis = True
+                    break # Don't send multiple times to the same organism
+
+    # Fallback to legacy ForgeFlow DMs if no Genesis organism took it
+    if not routed_to_genesis and channel_type == "im":
         workflow_keywords = ["when", "create", "build", "automate", "workflow", "send", "alert", "monitor", "every", "if", "trigger"]
         if any(kw in text.lower() for kw in workflow_keywords):
             await say(
                 text=f":rocket: *ForgeFlow* is processing your request:\n> {text}\n\n:hourglass_flowing_sand: Starting autonomous pipeline..."
             )
             asyncio.create_task(
-                _run_pipeline_from_slack(text, event.get("channel", ""), user)
+                _run_pipeline_from_slack(text, channel, user)
             )
         else:
             await say(
                 text=f":wave: Hi <@{user}>! I'm *ForgeFlow* — an AI-powered workflow generator.\n\n"
                 f"*What I can do:*\n"
-                f"• Discover APIs automatically (Deriv, Slack, Sheets, Jira, Gmail)\n"
+                f"• Discover APIs automatically\n"
                 f"• Generate executable Python workflows\n"
                 f"• Self-debug if anything fails\n"
                 f"• Deploy as a ready-to-run project\n\n"
                 f"*Try it:* Just describe what you want!\n"
-                f"_Example: When V75 moves 2% in 5 minutes, send a Slack alert to #trading-alerts, log to Google Sheets, and create a Jira ticket_"
+                f"_Example: When V75 moves 2% in 5 minutes, send a Slack alert_"
             )
 
 
@@ -255,6 +283,35 @@ async def handle_app_mention(event, say):
             f"_Example: @ForgeFlow When V75 moves 2%, alert Slack and log to Sheets_\n\n"
             f"Or use `/forge <description>` directly."
         )
+        return
+
+    from backend.genesis import store, runtime, events
+
+    # Route to any Genesis organism that has a "slack" perception source listening to this channel or universally
+    organisms = store.list_organisms()
+    routed_to_genesis = False
+    
+    for org in organisms:
+        for src in (org.perception_sources or []):
+            if src.get("kind") == "slack":
+                listen_channel = src.get("channel")
+                if not listen_channel or listen_channel == channel or listen_channel == "*":
+                    perception = {
+                        "type": "slack_message",
+                        "source": "slack",
+                        "channel": channel,
+                        "channel_type": "app_mention",
+                        "user": user,
+                        "text": clean_text,
+                        "ts": event.get("ts")
+                    }
+                    asyncio.create_task(
+                        runtime.perceive(org.id, perception, event_callback=events.make_callback())
+                    )
+                    routed_to_genesis = True
+                    break
+
+    if routed_to_genesis:
         return
 
     # Check if it's a workflow request
