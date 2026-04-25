@@ -131,7 +131,7 @@ async def extract_actions(user_request: str) -> list[dict]:
         "- 'monitor website' → HTTP GET health check, log to Google Sheets, send Slack alert, create Jira incident\n\n"
         "Output ONLY valid JSON with an 'actions' key containing an array:\n"
         '{"actions": [{"id": "step_1", "description": "specific API action with service name", '
-        '"service_hint": "Slack|Gmail|Jira|Google Sheets|HTTP|Deriv|SMTP", '
+        '"service_hint": "Slack|Gmail|Jira|Google Sheets|HTTP|SMTP", '
         '"api_type": "rest|websocket|email|http_check", '
         '"depends_on": [], "is_trigger": false}]}'
     )

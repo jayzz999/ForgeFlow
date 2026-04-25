@@ -74,16 +74,7 @@ def _get_available_credentials() -> list[dict]:
         ),
     })
 
-    # Deriv
-    deriv_id = os.getenv("DERIV_APP_ID", "")
-    creds.append({
-        "service": "Deriv",
-        "available": bool(deriv_id and not deriv_id.startswith("your-")),
-        "env_vars": ["DERIV_APP_ID", "DERIV_API_TOKEN"],
-        "note": "WebSocket API at wss://ws.derivws.com/websockets/v3" if deriv_id else "Not configured",
-    })
-
-    return creds
+    return [slack_status, sheets_status, gmail_status]
 
 
 def _fetch_slack_channels(token: str) -> list[str]:
@@ -203,7 +194,7 @@ async def generate_workflow_code(
 
     prompt += (
         f"CRITICAL: Use the EXACT input values from each step's 'inputs' dict in the generated code.\n"
-        f"For example, if a step has inputs: {{\"channel\": \"#deriv\", \"text\": \"Hello\"}}, use those EXACT values.\n"
+        f"For example, if a step has inputs: {{\"channel\": \"#notifications\", \"text\": \"Hello\"}}, use those EXACT values.\n"
         f"Do NOT substitute default values like '#general' — use what the user specified.\n\n"
         f"CRITICAL CONTEXT PASSING RULES:\n"
         f"  - Each step function MUST store its result as context['step_N'] = {{'ok': True, ...data...}}\n"
@@ -642,27 +633,6 @@ async def sheets_read_range(sheet_range: str = "Sheet1!A1:Z1000", spreadsheet_id
         r = await c.get(url, params={"key": GOOGLE_API_KEY})
         r.raise_for_status()
         return {"ok": True, "values": r.json().get("values", [])}
-```
-
-DERIV WEBSOCKET (env: DERIV_APP_ID, DERIV_API_TOKEN):
-```python
-import websockets, json, asyncio, os
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "")
-DERIV_TOKEN = os.getenv("DERIV_API_TOKEN", "")
-
-async def deriv_connect_and_subscribe(symbol: str = "R_100"):
-    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-    async with websockets.connect(ws_url) as ws:
-        # Authorize
-        await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-        auth = json.loads(await ws.recv())
-        if auth.get("error"): return {"ok": False, "error": auth["error"]["message"]}
-
-        # Subscribe to ticks
-        await ws.send(json.dumps({"ticks": symbol, "subscribe": 1}))
-        data = json.loads(await ws.recv())
-        tick = data.get("tick", {})
-        return {"ok": True, "symbol": symbol, "quote": tick.get("quote"), "epoch": tick.get("epoch")}
 ```
 
 HTTP / WEBHOOKS / HEALTH CHECKS (generic):

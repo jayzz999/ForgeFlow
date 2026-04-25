@@ -24,7 +24,7 @@ async def extract_requirements(user_request: str, messages: list[dict] | None = 
 CRITICAL RULES:
 1. ALWAYS decompose the request into 3-8 CONCRETE action steps — even if the user is vague
 2. For each action, specify a concrete service_hint (Slack, Gmail, Google Sheets, REST API, HTTP, etc.)
-   NOTE: Jira is NOT available. Do NOT suggest Jira. Available services: Slack, Gmail (SMTP), Google Sheets, HTTP/Webhooks, Deriv.
+   NOTE: Jira is NOT available. Do NOT suggest Jira. Available services: Slack, Gmail (SMTP), Google Sheets, HTTP/Webhooks.
 3. If the user doesn't specify services, INFER the most likely ones for their use case
 4. For vague requests like "automate X", break down into: data collection, processing, notification, logging, tracking steps
 5. Each action description must be specific enough to implement as an API call (e.g., "Send Slack notification to #onboarding channel with welcome message" NOT just "notify team")
@@ -98,7 +98,7 @@ OUTPUT ONLY valid JSON:
         {
             "id": "step_1",
             "description": "specific action description with service details",
-            "service_hint": "Slack|Gmail|Jira|Google Sheets|HTTP|Deriv|SMTP|REST API",
+            "service_hint": "Slack|Gmail|Jira|Google Sheets|HTTP|SMTP|REST API",
             "api_type": "rest|websocket|email|http_check",
             "depends_on": [],
             "is_trigger": false,

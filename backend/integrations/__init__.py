@@ -8,7 +8,6 @@ Supported services:
 - Jira: Issues, transitions, search, comments
 - Gmail: Send/read emails, labels
 - Google Sheets: Read/write/append rows, create spreadsheets
-- Deriv: WebSocket trading API (ticks, trading, account)
 - HTTP: Generic REST client for any API
 """
 
@@ -16,7 +15,6 @@ from backend.integrations.slack_client import SlackClient
 from backend.integrations.jira_client import JiraClient
 from backend.integrations.gmail_client import GmailClient
 from backend.integrations.sheets_client import GoogleSheetsClient
-from backend.integrations.deriv_client import DerivClient
 from backend.integrations.http_client import HTTPClient
 
 # Registry of all available integrations
@@ -64,17 +62,6 @@ INTEGRATIONS = {
             "append_row", "read_range", "update_range", "create_spreadsheet",
         ],
     },
-    "deriv": {
-        "client": DerivClient,
-        "name": "Deriv",
-        "description": "Trading API — ticks, contracts, account management",
-        "auth_type": "api_token",
-        "env_vars": ["DERIV_APP_ID", "DERIV_API_TOKEN"],
-        "capabilities": [
-            "subscribe_ticks", "get_tick_history", "get_proposal",
-            "buy_contract", "get_balance", "get_active_symbols",
-            "authorize", "get_statement",
-        ],
     },
     "http": {
         "client": HTTPClient,
@@ -93,7 +80,7 @@ def get_client(service: str, **kwargs):
     """Get a client instance for a service.
 
     Args:
-        service: Service name (slack, jira, gmail, sheets, deriv, http)
+        service: Service name (slack, jira, gmail, sheets, http)
         **kwargs: Passed to the client constructor
 
     Returns:
