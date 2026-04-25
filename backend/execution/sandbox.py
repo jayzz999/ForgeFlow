@@ -179,8 +179,9 @@ def _validate_code_ast(code: str) -> ExecutionResult:
     stdout = "\n".join(results)
 
     return ExecutionResult(
-        success=True,  # ALWAYS pass for syntactically valid code
-        stdout=stdout,
+        success=False,   # AST-only validation is NOT real execution
+        stdout=stdout + "\n[VALIDATION ONLY — Docker unavailable. Not deployed.]",
         stderr="",
+        error="SANDBOX_UNAVAILABLE",
         execution_time=elapsed,
     )
