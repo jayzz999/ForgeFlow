@@ -131,7 +131,7 @@ async def conversation_node(state: ForgeFlowState) -> dict:
         "confidence": confidence,
         "clarification_needed": clarifications,
         "phase": "collecting" if (clarifications and asked < 1 and confidence < 0.75) else "planning",
-        "clarifications_asked": asked + (1 if clarifications else 0),
+        "clarifications_asked": asked,
     }
 
 
@@ -233,6 +233,22 @@ async def plan_workflow_node(state: ForgeFlowState) -> dict:
         requirements = {**requirements, "_unmatched_actions": unmatched}
 
     dag = await build_dag(requirements, apis)
+    if not dag.steps:
+        message = (
+            "Workflow planning failed: no executable steps were produced. "
+            "This usually means the LLM provider was rate-limited or the request could not be mapped to actions."
+        )
+        await _emit(state, "workflow.failed", message, {
+            "reason": "empty_dag",
+            "provider": settings.LLM_PROVIDER,
+        })
+        return {
+            "workflow_dag": dag.model_dump(),
+            "data_mappings": [],
+            "phase": "failed",
+            "final_message": message,
+        }
+
     data_mappings = await map_data_flows(dag.steps)
 
     # ── TASK 1: Emit steps one-by-one for animated DAG build ──
@@ -284,6 +300,14 @@ def _find_parallel_groups(dag: WorkflowDAG) -> list[list[str]]:
             groups.append(step_ids)
 
     return groups
+
+
+def route_after_plan(state: ForgeFlowState) -> str:
+    """Stop early when planning produced no executable steps."""
+    dag = state.get("workflow_dag") or {}
+    if not dag.get("steps"):
+        return "invalid"
+    return "valid"
 
 
 # ── Node 4: Generate Code ────────────────────────────────────
@@ -742,7 +766,10 @@ def build_graph():
     })
 
     graph.add_edge("api_discovery", "plan_workflow")
-    graph.add_edge("plan_workflow", "generate_code")
+    graph.add_conditional_edges("plan_workflow", route_after_plan, {
+        "valid": "generate_code",
+        "invalid": END,
+    })
     graph.add_edge("generate_code", "review_security")
     graph.add_edge("review_security", "generate_tests")   # security → tests
     graph.add_edge("generate_tests", "sandbox_execute")    # tests → sandbox
@@ -784,6 +811,7 @@ async def run_forgeflow_pipeline(
     workflow_id: str,
     slack_channel: str = "",
     event_callback: Callable | None = None,
+    clarifications_asked: int = 0,
 ) -> dict:
     """Run the full ForgeFlow pipeline end-to-end."""
     graph = get_graph()
@@ -797,7 +825,7 @@ async def run_forgeflow_pipeline(
         "business_requirements": {},
         "confidence": 0.0,
         "clarification_needed": [],
-        "clarifications_asked": 0,
+        "clarifications_asked": clarifications_asked,
         "discovered_apis": [],
         "unmatched_actions": [],
         "workflow_dag": None,

@@ -593,6 +593,7 @@ async def _run_pipeline_ws(client_id: str, msg: dict, is_clarification: bool = F
         workflow_id=workflow_id,
         slack_channel=msg.get("slack_channel", settings.SLACK_NOTIFICATION_CHANNEL),
         event_callback=ws_event_callback,
+        clarifications_asked=1 if is_clarification else 0,
     )
 
     # If pipeline stopped for clarification, send clarification request to user
