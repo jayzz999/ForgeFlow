@@ -4,7 +4,7 @@ import json
 import uuid
 
 from backend.shared.config import settings
-from backend.shared.gemini_client import generate_json
+from backend.shared.llm_client import generate_json
 from backend.shared.models import WorkflowDAG, WorkflowStep, APIEndpoint
 
 

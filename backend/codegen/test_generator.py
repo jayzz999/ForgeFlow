@@ -12,7 +12,7 @@ import json
 import logging
 
 from backend.shared.config import settings
-from backend.shared.gemini_client import generate_text
+from backend.shared.llm_client import generate_text
 from backend.shared.models import WorkflowDAG
 
 logger = logging.getLogger("forgeflow.testgen")

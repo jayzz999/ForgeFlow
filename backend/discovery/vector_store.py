@@ -13,7 +13,7 @@ _collection: chromadb.Collection | None = None
 
 def _get_embedding_fn():
     if settings.EMBEDDING_PROVIDER == "gemini":
-        from backend.shared.gemini_embeddings import GeminiEmbeddingFunction
+        from backend.shared.optional_gemini_embeddings import GeminiEmbeddingFunction
         return GeminiEmbeddingFunction(
             api_key=settings.GEMINI_API_KEY,
             model_name=settings.GEMINI_EMBEDDING_MODEL,

@@ -6,7 +6,7 @@ Runs up to 3 iterations autonomously.
 """
 
 from backend.shared.config import settings
-from backend.shared.gemini_client import generate_json
+from backend.shared.llm_client import generate_json
 from backend.shared.models import DebugDiagnosis
 from backend.execution.error_parser import parse_error, find_undefined_names
 

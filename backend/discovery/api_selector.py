@@ -3,7 +3,7 @@
 import json
 
 from backend.shared.config import settings
-from backend.shared.gemini_client import generate_json
+from backend.shared.llm_client import generate_json
 from backend.shared.models import APIEndpoint, AuthType
 from backend.shared.services import SUPPORTED_SERVICE_LABEL
 

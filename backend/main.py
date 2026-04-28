@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from backend.shared.config import settings
 from backend.shared.models import ForgeRequest, ForgeResponse
 from backend.shared.security import require_admin_token
+from backend.shared.services import SUPPORTED_SERVICES
 
 
 # ── WebSocket Connection Manager ──────────────────────────────
@@ -192,6 +193,60 @@ async def forge_workflow(req: ForgeRequest):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "ForgeFlow"}
+
+
+@app.get("/api/status")
+async def provider_status():
+    """Return safe runtime configuration details for the UI and deploy checks."""
+    provider = settings.LLM_PROVIDER.lower()
+    if provider not in {"groq", "gemini"}:
+        provider = "groq"
+
+    llm_providers = {
+        "groq": {
+            "configured": bool(settings.GROQ_API_KEY),
+            "model": settings.GROQ_MODEL,
+            "fast_model": settings.GROQ_FAST_MODEL,
+        },
+        "gemini": {
+            "configured": bool(settings.GEMINI_API_KEY),
+            "model": settings.GEMINI_MODEL,
+            "fast_model": settings.GEMINI_FAST_MODEL,
+        },
+    }
+    embedding_provider = settings.EMBEDDING_PROVIDER.lower()
+    embedding_configured = (
+        True if embedding_provider == "local"
+        else bool(settings.GEMINI_API_KEY) if embedding_provider == "gemini"
+        else False
+    )
+
+    services = {}
+    for key, info in SUPPORTED_SERVICES.items():
+        required_env = info.get("env_vars", ())
+        services[key] = {
+            "name": info["name"],
+            "configured": all(bool(os.getenv(env_name, "")) for env_name in required_env),
+            "required_env": required_env,
+        }
+
+    return {
+        "status": "ok",
+        "service": "ForgeFlow",
+        "llm": {
+            "provider": provider,
+            "model": llm_providers[provider]["model"],
+            "fast_model": llm_providers[provider]["fast_model"],
+            "configured": llm_providers[provider]["configured"],
+            "providers": llm_providers,
+        },
+        "embeddings": {
+            "provider": embedding_provider,
+            "configured": embedding_configured,
+            "model": settings.GEMINI_EMBEDDING_MODEL if embedding_provider == "gemini" else "local",
+        },
+        "services": services,
+    }
 
 
 # ── Workflow Management API ──────────────────────────────────

@@ -13,7 +13,7 @@ import logging
 import os
 
 from backend.shared.config import settings
-from backend.shared.gemini_client import generate_text, generate_with_tools
+from backend.shared.llm_client import generate_text, generate_with_tools
 from backend.shared.models import WorkflowDAG
 from backend.tools.definitions import TOOLS_CONFIG
 from backend.tools.executor import execute_tool

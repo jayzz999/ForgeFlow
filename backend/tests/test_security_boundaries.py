@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.execution.sandbox import _validate_code_ast
-from backend.shared import gemini_client
+from backend.shared import llm_client
 from backend.shared.config import settings
 from backend.shared.path_security import normalize_relative_path, resolve_within_directory
 from backend.shared.security import verify_admin_token
@@ -94,9 +94,9 @@ async def test_tool_loop_records_only_successful_safe_written_files(monkeypatch)
             )
 
     fake_client = SimpleNamespace(aio=SimpleNamespace(models=FakeModels()))
-    monkeypatch.setattr(gemini_client, "get_client", lambda: fake_client)
+    monkeypatch.setattr(llm_client, "get_client", lambda: fake_client)
     monkeypatch.setattr(
-        gemini_client.types,
+        llm_client.types,
         "GenerateContentConfig",
         lambda **kwargs: kwargs,
     )
@@ -106,7 +106,7 @@ async def test_tool_loop_records_only_successful_safe_written_files(monkeypatch)
             return "Error: Path must be relative and within the project directory"
         return "Written 9 chars to config.py"
 
-    code, extra_files = await gemini_client.generate_with_tools(
+    code, extra_files = await llm_client.generate_with_tools(
         prompt="p",
         system="s",
         tools_config=None,

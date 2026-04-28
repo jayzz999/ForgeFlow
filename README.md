@@ -190,6 +190,14 @@ FORGEFLOW_ALLOW_UNAUTH_DANGEROUS=0
 
 `FORGEFLOW_ADMIN_TOKEN` is required for endpoints that execute generated workflow code unless `FORGEFLOW_ALLOW_UNAUTH_DANGEROUS=1` is explicitly set for local demos.
 
+Check runtime configuration without exposing secrets:
+
+```bash
+curl http://localhost:8000/api/status
+```
+
+The status response reports the active LLM provider, selected models, embedding provider, configured service flags, and required environment variable names only.
+
 ## License
 
 MIT
