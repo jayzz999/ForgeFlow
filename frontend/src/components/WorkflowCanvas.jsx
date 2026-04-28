@@ -3,6 +3,8 @@ import {
   ReactFlow,
   Background,
   Controls,
+  Handle,
+  Position,
   useNodesState,
   useEdgesState,
 } from '@xyflow/react'
@@ -41,7 +43,7 @@ function CustomNode({ data }) {
 
   return (
     <div
-      className={`px-4 py-3 rounded-xl border-2 min-w-[180px] animate-node-appear backdrop-blur-sm ${animClass}`}
+      className={`px-4 py-3 rounded-xl border-2 min-w-[180px] animate-node-appear backdrop-blur-sm relative ${animClass}`}
       style={{
         background: `linear-gradient(135deg, ${colors.bg}20, ${colors.bg}08)`,
         borderColor: data.status === 'failed' ? '#ef4444' :
@@ -51,6 +53,16 @@ function CustomNode({ data }) {
                      colors.border,
       }}
     >
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="!w-2 !h-2 !bg-forge-accent !border-forge-accent"
+      />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!w-2 !h-2 !bg-forge-accent !border-forge-accent"
+      />
       <div className="flex items-center gap-2 mb-1">
         <div
           className="w-2 h-2 rounded-full shrink-0"
@@ -205,7 +217,7 @@ export default function WorkflowCanvas({ dag, dagSteps, phase, nodeStatuses = {}
   }, [dag, phase, nodeStatuses])
 
   return (
-    <div className="h-full w-full relative bg-gradient-to-br from-forge-bg via-forge-bg to-indigo-950/20">
+    <div className="h-full min-h-[220px] w-full relative bg-gradient-to-br from-forge-bg via-forge-bg to-indigo-950/20">
       {/* Canvas Label */}
       <div className="absolute top-3 left-4 z-10 text-xs text-forge-muted font-medium">
         Workflow Canvas
@@ -222,6 +234,7 @@ export default function WorkflowCanvas({ dag, dagSteps, phase, nodeStatuses = {}
       </div>
 
       <ReactFlow
+        className="h-full w-full"
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}

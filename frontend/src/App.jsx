@@ -141,9 +141,9 @@ export default function App() {
       )}
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
         {/* Chat Panel - Left */}
-        <div className="w-[400px] min-w-[350px] border-r border-forge-border flex flex-col">
+        <div className="w-[400px] min-w-[350px] border-r border-forge-border flex flex-col min-h-0">
           <ChatPanel
             events={events}
             phase={phase}
@@ -159,9 +159,9 @@ export default function App() {
         </div>
 
         {/* Right Panel - Canvas + Code */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {/* Workflow Canvas */}
-          <div className={`${showCode ? 'h-1/2' : 'flex-1'} border-b border-forge-border`}>
+          <div className={`${showCode ? 'h-1/2' : 'flex-1'} min-h-[220px] border-b border-forge-border`}>
             <WorkflowCanvas
               dag={dag}
               dagSteps={dagSteps}
@@ -172,7 +172,7 @@ export default function App() {
 
           {/* Code Panel */}
           {showCode && (
-            <div className="h-1/2 overflow-hidden">
+            <div className="h-1/2 min-h-0 overflow-hidden">
               <Suspense fallback={<div className="h-full p-4 text-sm text-forge-muted">Loading code view...</div>}>
                 <CodePanel
                   code={code}
