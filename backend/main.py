@@ -12,12 +12,13 @@ logging.getLogger("slack").setLevel(logging.WARNING)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
 logging.getLogger("slack_sdk").setLevel(logging.WARNING)
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from backend.shared.config import settings
 from backend.shared.models import ForgeRequest, ForgeResponse
+from backend.shared.security import require_admin_token
 
 
 # ── WebSocket Connection Manager ──────────────────────────────
@@ -107,29 +108,7 @@ async def lifespan(app: FastAPI):
     else:
         print("[Slack] App token not configured — /forge command disabled")
 
-    # Startup: Genesis lifecycle (per-organism heartbeats)
-    from backend.genesis import lifecycle as _genesis_lifecycle
-    _genesis_lifecycle.start()
-    print("[Genesis] Lifecycle supervisor started")
-
-    # Startup: Genesis MCP pool — register global servers from catalog
-    from backend.genesis.mcp import client as _mcp_client, catalog as _mcp_catalog
-    global_specs = _mcp_catalog.load_global_specs()
-    if global_specs:
-        await _mcp_client.pool.ensure_global(global_specs)
-        print(f"[Genesis] MCP pool: {len(global_specs)} global server(s) registered")
-
     yield
-    # Shutdown
-    try:
-        await _genesis_lifecycle.stop()
-    except Exception:
-        pass
-    try:
-        from backend.genesis.mcp import client as _mcp_client
-        await _mcp_client.pool.shutdown()
-    except Exception:
-        pass
 
 
 app = FastAPI(title="ForgeFlow", version="1.0.0", lifespan=lifespan)
@@ -141,20 +120,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Genesis (organisms, not workflows) — mounted alongside ForgeFlow v1
-from backend.genesis.api import router as genesis_router  # noqa: E402
-from backend.genesis import events as _genesis_events  # noqa: E402
-app.include_router(genesis_router)
-
-
-async def _genesis_to_ws(event: dict) -> None:
-    """Forward every Genesis event to all connected WebSocket clients."""
-    await manager.broadcast(event)
-
-
-_genesis_events.subscribe(_genesis_to_ws)
-
 
 # ── REST Endpoints ────────────────────────────────────────────
 
@@ -310,8 +275,10 @@ async def get_workflow_file(workflow_id: str, file_path: str):
         raise HTTPException(status_code=404, detail="Workflow not found")
 
     # Prevent path traversal
-    full_path = os.path.realpath(os.path.join(project_path, file_path))
-    if not full_path.startswith(os.path.realpath(project_path)):
+    from backend.shared.path_security import resolve_within_directory
+    try:
+        full_path, _ = resolve_within_directory(project_path, file_path)
+    except ValueError:
         raise HTTPException(status_code=403, detail="Invalid path")
 
     if not os.path.exists(full_path) or not os.path.isfile(full_path):
@@ -326,7 +293,7 @@ async def get_workflow_file(workflow_id: str, file_path: str):
 
 
 @app.post("/api/workflows/{workflow_id}/run")
-async def run_workflow(workflow_id: str):
+async def run_workflow(workflow_id: str, _admin: bool = Depends(require_admin_token)):
     """Execute a deployed workflow with real credentials and return its output.
 
     Runs `python workflow.py` inside the workflow's project folder, with all

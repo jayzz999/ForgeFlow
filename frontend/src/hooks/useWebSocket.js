@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8001'
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
 const MAX_RECONNECT_ATTEMPTS = 5
 const PIPELINE_TIMEOUT_MS = 180000 // 3 min timeout — pipeline should complete or clarify by then
 

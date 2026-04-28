@@ -30,13 +30,13 @@ cd ..
 # Start backend and frontend in parallel
 echo ""
 echo "🚀 Starting services..."
-echo "   Backend:  http://localhost:8001"
+echo "   Backend:  http://localhost:8000"
 echo "   Frontend: http://localhost:3000"
-echo "   API Docs: http://localhost:8001/docs"
+echo "   API Docs: http://localhost:8000/docs"
 echo ""
 
 # Run backend (from project root so imports work)
-python3.11 -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --reload &
+python3.11 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!
 
 # Run frontend

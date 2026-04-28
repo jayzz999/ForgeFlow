@@ -74,7 +74,7 @@ def _get_available_credentials() -> list[dict]:
         ),
     })
 
-    return [slack_status, sheets_status, gmail_status]
+    return creds
 
 
 def _fetch_slack_channels(token: str) -> list[str]:

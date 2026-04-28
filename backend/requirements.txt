@@ -25,8 +25,5 @@ python-multipart==0.0.20
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 
-# Genesis Phase 1
-mcp>=1.0.0
-groq>=0.11.0
 pytest>=8.0.0
 pytest-asyncio>=0.24.0

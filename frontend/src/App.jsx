@@ -6,8 +6,6 @@ import CodePanel from './components/CodePanel'
 import StatusBar from './components/StatusBar'
 import ApiDiscoveryBadge from './components/ApiDiscoveryBadge'
 import DebugOverlay from './components/DebugOverlay'
-import GenesisPage from './components/genesis/GenesisPage'
-
 // ── Celebration Overlay ──────────────────────────────────────
 function CelebrationOverlay({ show }) {
   if (!show) return null
@@ -68,14 +66,7 @@ export default function App() {
   } = useWebSocket()
 
   const [showCode, setShowCode] = useState(true)
-  const [mode, setMode] = useState(() => (window.location.hash === '#genesis' ? 'genesis' : 'forge'))
   const [showCelebration, setShowCelebration] = useState(false)
-
-  useEffect(() => {
-    const onHash = () => setMode(window.location.hash === '#genesis' ? 'genesis' : 'forge')
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
-  }, [])
 
   useEffect(() => {
     if (phase === 'deployed') {
@@ -84,10 +75,6 @@ export default function App() {
       return () => clearTimeout(timer)
     }
   }, [phase])
-
-  if (mode === 'genesis') {
-    return <GenesisPage onBack={() => { window.location.hash = ''; setMode('forge') }} />
-  }
 
   const handleDownload = () => {
     if (deployedWorkflowId) {
@@ -128,13 +115,6 @@ export default function App() {
             <div className={`w-2 h-2 rounded-full ${connected ? 'bg-forge-success animate-pulse' : 'bg-forge-error'}`} />
             {connected ? 'Connected' : 'Disconnected'}
           </div>
-          <button
-            onClick={() => { window.location.hash = 'genesis'; setMode('genesis') }}
-            className="text-xs px-3 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500/20 to-indigo-500/20 hover:from-fuchsia-500/40 hover:to-indigo-500/40 border border-purple-500/40 text-purple-200"
-            title="Open Genesis — living digital organisms"
-          >
-            🧬 Genesis
-          </button>
           <button
             onClick={() => setShowCode(!showCode)}
             className="text-xs px-3 py-1.5 rounded-lg bg-forge-border/50 hover:bg-indigo-500/20 border border-forge-border transition-colors"

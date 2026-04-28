@@ -9,19 +9,6 @@ class Settings:
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_FAST_MODEL: str = "gemini-2.5-flash"
 
-    # ── Genesis LLM provider ───────────────────────────────────────
-    # GENESIS_LLM_PROVIDER=groq  → free Groq/Llama (dev/testing)
-    # GENESIS_LLM_PROVIDER=gemini → Gemini 2.5 Flash (demo/prod)
-    GENESIS_LLM_PROVIDER: str = os.getenv("GENESIS_LLM_PROVIDER", "gemini")
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-
-    # ── Genesis dreaming throttle ──────────────────────────────────
-    # GENESIS_DREAMING=0  → disable idle dreaming entirely (zero extra cost)
-    # GENESIS_IDLE_DREAM_AFTER_S → seconds idle before dreaming (default 3600)
-    GENESIS_DREAMING: bool = os.getenv("GENESIS_DREAMING", "1") not in ("0", "false", "no")
-    GENESIS_IDLE_DREAM_AFTER_S: int = int(os.getenv("GENESIS_IDLE_DREAM_AFTER_S", "3600"))
-
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
     SLACK_APP_TOKEN: str = os.getenv("SLACK_APP_TOKEN", "")
     SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
