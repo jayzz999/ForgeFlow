@@ -5,9 +5,16 @@ load_dotenv()
 
 
 class Settings:
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").lower()
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_FAST_MODEL: str = os.getenv("GROQ_FAST_MODEL", GROQ_MODEL)
+
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = "gemini-2.5-flash"
-    GEMINI_FAST_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    GEMINI_FAST_MODEL: str = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
+    EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "local").lower()
+    GEMINI_EMBEDDING_MODEL: str = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
     SLACK_APP_TOKEN: str = os.getenv("SLACK_APP_TOKEN", "")

@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import tempfile
 import uuid
 import zipfile
 import io
@@ -48,6 +50,28 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+RUN_ENV_PREFIXES = (
+    "SLACK_", "GMAIL_", "GOOGLE_", "SHEETS_",
+    "WEBHOOK_", "API_", "AUTH_", "TOKEN_",
+)
+RUN_ENV_EXACT = {"TARGET_URL"}
+MAX_RUN_OUTPUT_CHARS = 12000
+
+
+def _workflow_run_env() -> dict[str, str]:
+    """Allowlist env vars passed to generated workflow execution."""
+    env = {"PYTHONUNBUFFERED": "1"}
+    for key, value in os.environ.items():
+        if key in RUN_ENV_EXACT or any(key.startswith(prefix) for prefix in RUN_ENV_PREFIXES):
+            env[key] = value
+    return env
+
+
+def _trim_output(value: str) -> str:
+    if len(value) <= MAX_RUN_OUTPUT_CHARS:
+        return value
+    return value[:MAX_RUN_OUTPUT_CHARS] + f"\n[truncated to {MAX_RUN_OUTPUT_CHARS} chars]"
 
 # ── Event Bus ─────────────────────────────────────────────────
 
@@ -265,6 +289,25 @@ async def list_workflow_files(workflow_id: str):
     return {"workflow_id": workflow_id, "files": files}
 
 
+@app.delete("/api/workflows/{workflow_id}")
+async def delete_workflow(workflow_id: str, _admin: bool = Depends(require_admin_token)):
+    """Delete a deployed workflow project and metadata."""
+    from backend.deployment.workflow_store import delete_workflow as _delete
+    deleted = _delete(workflow_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return {"deleted": workflow_id}
+
+
+@app.post("/api/workflows/prune")
+async def prune_workflows(body: dict, _admin: bool = Depends(require_admin_token)):
+    """Delete old workflow projects, keeping the newest N."""
+    from backend.deployment.workflow_store import prune_workflows as _prune
+    keep_latest = int(body.get("keep_latest", 50))
+    deleted = _prune(keep_latest=keep_latest)
+    return {"deleted": deleted, "keep_latest": keep_latest}
+
+
 @app.get("/api/workflows/{workflow_id}/files/{file_path:path}")
 async def get_workflow_file(workflow_id: str, file_path: str):
     """Get the content of a specific file in a deployed workflow."""
@@ -296,9 +339,8 @@ async def get_workflow_file(workflow_id: str, file_path: str):
 async def run_workflow(workflow_id: str, _admin: bool = Depends(require_admin_token)):
     """Execute a deployed workflow with real credentials and return its output.
 
-    Runs `python workflow.py` inside the workflow's project folder, with all
-    environment variables from the current process (Slack token, Gemini key, etc.)
-    injected so real API calls work.
+    Runs `python workflow.py` in an isolated temp copy with allowlisted service
+    environment variables injected so real API calls work.
     """
     import asyncio as _asyncio
     from backend.deployment.workflow_store import get_workflow_project_path
@@ -311,50 +353,63 @@ async def run_workflow(workflow_id: str, _admin: bool = Depends(require_admin_to
     if not os.path.exists(workflow_file):
         raise HTTPException(status_code=404, detail="workflow.py not found in project")
 
-    req_file = os.path.join(project_path, "requirements.txt")
     start = datetime.utcnow()
 
     try:
-        # Step 1: Install dependencies (silent, best-effort)
-        if os.path.exists(req_file):
-            pip = await _asyncio.create_subprocess_exec(
-                "pip", "install", "-q", "-r", req_file,
+        with tempfile.TemporaryDirectory(prefix=f"forgeflow_run_{workflow_id}_") as run_dir:
+            shutil.copytree(project_path, run_dir, dirs_exist_ok=True)
+            req_file = os.path.join(run_dir, "requirements.txt")
+
+            # Step 1: Install dependencies in the isolated run directory.
+            if os.path.exists(req_file):
+                pip = await _asyncio.create_subprocess_exec(
+                    "pip", "install", "-q", "-r", req_file,
+                    stdout=_asyncio.subprocess.PIPE,
+                    stderr=_asyncio.subprocess.PIPE,
+                    cwd=run_dir,
+                    env=_workflow_run_env(),
+                )
+                try:
+                    await _asyncio.wait_for(pip.communicate(), timeout=45)
+                except _asyncio.TimeoutError:
+                    pip.kill()
+                    await pip.communicate()
+                    return {
+                        "success": False,
+                        "stdout": "",
+                        "stderr": "Dependency installation timed out after 45s",
+                        "execution_time": 45.0,
+                        "return_code": -1,
+                    }
+
+            # Step 2: Run the workflow with only allowlisted service env vars.
+            proc = await _asyncio.create_subprocess_exec(
+                "python", "workflow.py",
                 stdout=_asyncio.subprocess.PIPE,
                 stderr=_asyncio.subprocess.PIPE,
-                cwd=project_path,
+                cwd=run_dir,
+                env=_workflow_run_env(),
             )
+
             try:
-                await _asyncio.wait_for(pip.communicate(), timeout=60)
+                stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
             except _asyncio.TimeoutError:
-                pass  # Continue even if pip times out
-
-        # Step 2: Run the workflow with real env vars
-        proc = await _asyncio.create_subprocess_exec(
-            "python", "workflow.py",
-            stdout=_asyncio.subprocess.PIPE,
-            stderr=_asyncio.subprocess.PIPE,
-            cwd=project_path,
-            env={**os.environ},  # Pass all real credentials
-        )
-
-        try:
-            stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
-        except _asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return {
-                "success": False,
-                "stdout": "",
-                "stderr": "⏱️ Execution timed out after 120s",
-                "execution_time": 120.0,
-                "return_code": -1,
-            }
+                try:
+                    proc.kill()
+                    await proc.communicate()
+                except Exception:
+                    pass
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": "Execution timed out after 120s",
+                    "execution_time": 120.0,
+                    "return_code": -1,
+                }
 
         elapsed = (datetime.utcnow() - start).total_seconds()
-        stdout_str = stdout_b.decode("utf-8", errors="replace")
-        stderr_str = stderr_b.decode("utf-8", errors="replace")
+        stdout_str = _trim_output(stdout_b.decode("utf-8", errors="replace"))
+        stderr_str = _trim_output(stderr_b.decode("utf-8", errors="replace"))
 
         return {
             "success": proc.returncode == 0,
@@ -410,8 +465,6 @@ async def test_integration(service: str):
         # Quick connectivity test per service
         if service == "slack":
             result = await client.list_channels(limit=1)
-        elif service == "jira":
-            result = await client.search_issues("order by created DESC", max_results=1)
         elif service == "gmail":
             result = await client.list_labels()
         elif service == "sheets":

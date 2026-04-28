@@ -11,7 +11,7 @@ Most automation tools connect pre-built blocks. ForgeFlow generates the workflow
 | 1 | Conversation Engine | Extracts requirements from natural language and asks targeted clarification questions |
 | 2 | Semantic API Discovery | Finds matching APIs from indexed service specs using ChromaDB vector search |
 | 3 | DAG Planner | Builds dependency-aware workflow steps and data mappings |
-| 4 | Code Generator | Uses Gemini tool calling to research APIs and write executable Python |
+| 4 | Code Generator | Uses the configured LLM provider to research APIs and write executable Python |
 | 5 | Security Review | Scans generated code for unsafe patterns |
 | 6 | Test Generator | Creates pytest coverage for the generated workflow |
 | 7 | Sandbox Execution | Runs code in Docker when available, with AST validation as fallback |
@@ -99,13 +99,22 @@ docker-compose up --build
 
 The frontend runs on `http://localhost:3000` and the backend on `http://localhost:8000`.
 
+## Reliability And Safety
+
+- CI runs backend tests and the frontend production build on every push and pull request.
+- A mocked end-to-end smoke test verifies the pipeline can produce and save a workflow without paid LLM calls.
+- Generated workflow runs are protected by `FORGEFLOW_ADMIN_TOKEN`.
+- Workflow execution uses a temporary run directory and only receives allowlisted service environment variables.
+- Deployment packages include an `artifacts/` folder with structured requirements, DAG, security, test, execution, and debug data.
+- Old workflow packages can be deleted individually or pruned through the admin API.
+
 ## Tech Stack
 
 | Component | Technology |
 |-----------|------------|
 | AI Pipeline | LangGraph |
-| LLM | Google Gemini 2.5 Flash |
-| Embeddings | Gemini Embedding 001 |
+| LLM | Groq by default, Gemini optional |
+| Embeddings | Local ChromaDB default by default, Gemini optional |
 | Vector Store | ChromaDB |
 | Backend | FastAPI + WebSocket |
 | Frontend | React + Vite + React Flow + Tailwind CSS |
@@ -121,7 +130,7 @@ backend/
   conversation/          # Requirement extraction and clarification
   discovery/             # API specs, vector store, API selection
   planner/               # DAG building and data mapping
-  codegen/               # Gemini code generation, tests, security review
+  codegen/               # LLM code generation, tests, security review
   execution/             # Docker sandbox, AST fallback, self-debugger
   deployment/            # Workflow persistence and downloadable packages
   feedback/              # Feedback and pattern learning
@@ -151,7 +160,15 @@ workflows/               # Generated workflow projects
 ## Environment Variables
 
 ```env
-GEMINI_API_KEY=your_gemini_api_key
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
+
+# Optional Gemini fallback
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+
+EMBEDDING_PROVIDER=local
 
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-token

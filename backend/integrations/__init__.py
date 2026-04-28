@@ -5,14 +5,12 @@ These are used by generated workflows to ensure REAL integrations, not placehold
 
 Supported services:
 - Slack: Messages, channels, user lookup, reactions, file uploads
-- Jira: Issues, transitions, search, comments
 - Gmail: Send/read emails, labels
 - Google Sheets: Read/write/append rows, create spreadsheets
 - HTTP: Generic REST client for any API
 """
 
 from backend.integrations.slack_client import SlackClient
-from backend.integrations.jira_client import JiraClient
 from backend.integrations.gmail_client import GmailClient
 from backend.integrations.sheets_client import GoogleSheetsClient
 from backend.integrations.http_client import HTTPClient
@@ -29,17 +27,6 @@ INTEGRATIONS = {
             "send_message", "create_channel", "invite_to_channel",
             "list_channels", "list_users", "add_reaction", "upload_file",
             "lookup_user_by_email",
-        ],
-    },
-    "jira": {
-        "client": JiraClient,
-        "name": "Jira",
-        "description": "Project management, issue tracking, workflows",
-        "auth_type": "basic_auth",
-        "env_vars": ["JIRA_DOMAIN", "JIRA_EMAIL", "JIRA_API_TOKEN"],
-        "capabilities": [
-            "create_issue", "get_issue", "update_issue", "search_issues",
-            "transition_issue", "add_comment", "assign_issue",
         ],
     },
     "gmail": {
@@ -62,7 +49,6 @@ INTEGRATIONS = {
             "append_row", "read_range", "update_range", "create_spreadsheet",
         ],
     },
-    },
     "http": {
         "client": HTTPClient,
         "name": "HTTP/REST",
@@ -80,7 +66,7 @@ def get_client(service: str, **kwargs):
     """Get a client instance for a service.
 
     Args:
-        service: Service name (slack, jira, gmail, sheets, http)
+        service: Service name (slack, gmail, sheets, http)
         **kwargs: Passed to the client constructor
 
     Returns:

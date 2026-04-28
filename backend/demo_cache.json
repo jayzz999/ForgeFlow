@@ -12,7 +12,11 @@
     "message": "Requirements extracted (confidence: 91%)",
     "data": {
       "intent": "monitoring",
-      "entities": ["HTTP", "Slack", "Google Sheets"],
+      "entities": [
+        "HTTP",
+        "Slack",
+        "Google Sheets"
+      ],
       "actions_count": 3
     },
     "_delay": 1.0
@@ -63,9 +67,18 @@
     "message": "Discovered 3 APIs",
     "data": {
       "apis": [
-        {"service": "http", "endpoint": "GET /health"},
-        {"service": "slack", "endpoint": "/chat.postMessage"},
-        {"service": "sheets", "endpoint": "/spreadsheets/values/append"}
+        {
+          "service": "http",
+          "endpoint": "GET /health"
+        },
+        {
+          "service": "slack",
+          "endpoint": "/chat.postMessage"
+        },
+        {
+          "service": "sheets",
+          "endpoint": "/spreadsheets/values/append"
+        }
       ]
     },
     "_delay": 0.7
@@ -81,7 +94,10 @@
         "depends_on": [],
         "step_type": "api_call",
         "description": "Send an HTTP GET request to the configured URL and capture status code and latency",
-        "api": {"service": "http", "endpoint": "GET /health"}
+        "api": {
+          "service": "http",
+          "endpoint": "GET /health"
+        }
       },
       "step_index": 0,
       "total_steps": 3
@@ -96,10 +112,15 @@
       "step": {
         "id": "step_2",
         "name": "Send Slack Alert",
-        "depends_on": ["step_1"],
+        "depends_on": [
+          "step_1"
+        ],
         "step_type": "api_call",
         "description": "Post an alert to Slack when the health check fails",
-        "api": {"service": "slack", "endpoint": "/chat.postMessage"}
+        "api": {
+          "service": "slack",
+          "endpoint": "/chat.postMessage"
+        }
       },
       "step_index": 1,
       "total_steps": 3
@@ -114,10 +135,15 @@
       "step": {
         "id": "step_3",
         "name": "Log Result to Google Sheets",
-        "depends_on": ["step_1"],
+        "depends_on": [
+          "step_1"
+        ],
         "step_type": "api_call",
         "description": "Append timestamp, URL, status code, and latency to a Google Sheet",
-        "api": {"service": "sheets", "endpoint": "/spreadsheets/values/append"}
+        "api": {
+          "service": "sheets",
+          "endpoint": "/spreadsheets/values/append"
+        }
       },
       "step_index": 2,
       "total_steps": 3
@@ -130,11 +156,32 @@
     "message": "Workflow DAG created with 3 steps",
     "data": {
       "steps": [
-        {"id": "step_1", "name": "Check Website Health", "depends_on": []},
-        {"id": "step_2", "name": "Send Slack Alert", "depends_on": ["step_1"]},
-        {"id": "step_3", "name": "Log Result to Google Sheets", "depends_on": ["step_1"]}
+        {
+          "id": "step_1",
+          "name": "Check Website Health",
+          "depends_on": []
+        },
+        {
+          "id": "step_2",
+          "name": "Send Slack Alert",
+          "depends_on": [
+            "step_1"
+          ]
+        },
+        {
+          "id": "step_3",
+          "name": "Log Result to Google Sheets",
+          "depends_on": [
+            "step_1"
+          ]
+        }
       ],
-      "parallel_possible": [["step_2", "step_3"]]
+      "parallel_possible": [
+        [
+          "step_2",
+          "step_3"
+        ]
+      ]
     },
     "_delay": 0.8
   },
@@ -161,14 +208,21 @@
     "event_type": "security.complete",
     "phase": "testing",
     "message": "Security review: passed",
-    "data": {"safe": true, "findings": []},
+    "data": {
+      "safe": true,
+      "findings": []
+    },
     "_delay": 0.6
   },
   {
     "event_type": "testing.passed",
     "phase": "testing",
     "message": "Tests passed! 4/4 tests passed",
-    "data": {"passed": 4, "failed": 0, "total": 4},
+    "data": {
+      "passed": 4,
+      "failed": 0,
+      "total": 4
+    },
     "_delay": 0.7
   },
   {
@@ -195,10 +249,18 @@
     "data": {
       "success": true,
       "debug_attempts": 0,
-      "test_results": {"passed": 4, "failed": 0, "total": 4},
+      "test_results": {
+        "passed": 4,
+        "failed": 0,
+        "total": 4
+      },
       "code_lines": 82,
       "extra_files": [],
-      "services": ["http", "slack", "sheets"],
+      "services": [
+        "http",
+        "slack",
+        "sheets"
+      ],
       "approval_required": true
     },
     "_delay": 0.8
@@ -206,12 +268,26 @@
   {
     "event_type": "workflow.deployed",
     "phase": "deployed",
-    "message": "Workflow deployed! ID: demo-health — saved 9 files",
+    "message": "Workflow deployed! ID: demo-health \u2014 saved 9 files",
     "data": {
       "workflow_id": "demo-health",
       "project_dir": "workflows/demo-health",
-      "files": ["workflow.py", "requirements.txt", ".env.example", "run.sh", "README.md", "Dockerfile", "docker-compose.yml", "k8s-deployment.yaml", "Makefile"],
-      "services": ["http", "slack", "sheets"]
+      "files": [
+        "workflow.py",
+        "requirements.txt",
+        ".env.example",
+        "run.sh",
+        "README.md",
+        "Dockerfile",
+        "docker-compose.yml",
+        "k8s-deployment.yaml",
+        "Makefile"
+      ],
+      "services": [
+        "http",
+        "slack",
+        "sheets"
+      ]
     },
     "_delay": 0.5
   }

@@ -1,25 +1,27 @@
-"""Centralized Gemini API client for ForgeFlow.
+"""Centralized LLM client for ForgeFlow.
 
 All LLM calls go through this module. Provides:
 - generate_json() — for structured JSON responses
 - generate_text() — for free-text responses
 - generate_with_tools() — agentic tool-calling loop (browse, shell, write, test)
-- get_client() — raw Gemini client access
+- get_client() — raw Gemini client access for the optional Gemini provider
 """
 
 import json
 import logging
-from typing import Any, Callable, Coroutine
+from typing import Callable
 
+import httpx
 from google import genai
 from google.genai import types
 
 from backend.shared.config import settings
 
-logger = logging.getLogger("forgeflow.gemini")
+logger = logging.getLogger("forgeflow.llm")
 
 _client: genai.Client | None = None
 MAX_TOOL_ROUNDS = 15  # Safety limit for tool-calling loops
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 def get_client() -> genai.Client:
@@ -30,6 +32,71 @@ def get_client() -> genai.Client:
     return _client
 
 
+def _provider() -> str:
+    provider = settings.LLM_PROVIDER.lower()
+    if provider == "gemini":
+        return "gemini"
+    return "groq"
+
+
+def _model(model: str | None, *, fast: bool = False) -> str:
+    if _provider() == "gemini":
+        if model and not model.startswith("gemini"):
+            model = None
+        return model or (settings.GEMINI_FAST_MODEL if fast else settings.GEMINI_MODEL)
+    if model and model.startswith("gemini"):
+        model = None
+    return model or (settings.GROQ_FAST_MODEL if fast else settings.GROQ_MODEL)
+
+
+async def _groq_chat(
+    messages: list[dict],
+    *,
+    model: str | None = None,
+    temperature: float = 0,
+    max_tokens: int = 8000,
+    response_format: dict | None = None,
+    tools: list[dict] | None = None,
+) -> dict:
+    if not settings.GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
+
+    payload = {
+        "model": model or settings.GROQ_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            GROQ_CHAT_URL,
+            headers={
+                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def _extract_json(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
+
+
 async def generate_json(
     prompt: str,
     system: str,
@@ -37,14 +104,29 @@ async def generate_json(
     temperature: float = 0,
     max_tokens: int = 2000,
 ) -> dict:
-    """Call Gemini and return parsed JSON.
+    """Call the configured LLM and return parsed JSON."""
+    if _provider() == "groq":
+        response = await _groq_chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt + "\n\nReturn only valid JSON."},
+            ],
+            model=_model(model, fast=True),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        text = response["choices"][0]["message"].get("content") or "{}"
+        try:
+            return _extract_json(text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Groq JSON response: {e}")
+            logger.debug(f"Raw response: {text[:500]}")
+            return {}
 
-    Uses response_mime_type="application/json" to enforce JSON output.
-    """
     client = get_client()
-
     response = await client.aio.models.generate_content(
-        model=model or settings.GEMINI_MODEL,
+        model=_model(model),
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -69,10 +151,22 @@ async def generate_text(
     temperature: float = 0,
     max_tokens: int = 8000,
 ) -> str:
-    """Call Gemini and return plain text."""
+    """Call the configured LLM and return plain text."""
+    if _provider() == "groq":
+        response = await _groq_chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            model=_model(model),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response["choices"][0]["message"].get("content") or ""
+
     client = get_client()
     response = await client.aio.models.generate_content(
-        model=model or settings.GEMINI_MODEL,
+        model=_model(model),
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -103,10 +197,10 @@ async def generate_with_tools(
     Args:
         prompt: The user/system prompt
         system: System instruction
-        tools_config: Gemini Tool with function declarations
+        tools_config: Gemini Tool with function declarations when provider=gemini
         tool_executor: async fn(tool_name, tool_args, project_dir) -> str
         project_dir: Working directory for file/shell tools
-        model: Gemini model override
+        model: provider model override
         temperature: LLM temperature
         max_tokens: Max output tokens per round
         on_tool_call: Optional callback(tool_name, tool_args, result) for UI events
@@ -115,6 +209,18 @@ async def generate_with_tools(
         (final_text, extra_files) where extra_files is a dict of
         {relative_path: content} for any files written via write_file tool.
     """
+    if _provider() == "groq":
+        return await _generate_with_tools_groq(
+            prompt=prompt,
+            system=system,
+            tool_executor=tool_executor,
+            project_dir=project_dir,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_tool_call=on_tool_call,
+        )
+
     client = get_client()
     extra_files: dict[str, str] = {}
 
@@ -125,7 +231,7 @@ async def generate_with_tools(
         logger.info(f"[Agent] Round {round_num + 1}/{MAX_TOOL_ROUNDS}")
 
         response = await client.aio.models.generate_content(
-            model=model or settings.GEMINI_MODEL,
+            model=_model(model),
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system,
@@ -175,7 +281,7 @@ async def generate_with_tools(
             result = await tool_executor(tool_name, tool_args, project_dir)
 
             # Track written files — normalize and reject path-traversal attempts
-            if tool_name == "write_file" and tool_args.get("path"):
+            if tool_name == "write_file" and tool_args.get("path") and not result.lower().startswith("error"):
                 from backend.shared.path_security import normalize_relative_path
                 try:
                     safe_path = normalize_relative_path(tool_args["path"])
@@ -212,3 +318,156 @@ async def generate_with_tools(
             if part.text:
                 last_text += part.text
     return last_text, extra_files
+
+
+def _groq_tool_schema() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_web_page",
+                "description": "Fetch a web page and return useful text content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "extract_code": {"type": "boolean"},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_shell",
+                "description": "Execute a safe shell command in the workflow project directory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "timeout": {"type": "integer"},
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write content to a relative file path in the workflow project directory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a relative file path from the workflow project directory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "test_api_endpoint",
+                "description": "Make an HTTP request to test an API endpoint.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string"},
+                        "url": {"type": "string"},
+                        "headers": {"type": "string"},
+                        "body": {"type": "string"},
+                    },
+                    "required": ["method", "url"],
+                },
+            },
+        },
+    ]
+
+
+async def _generate_with_tools_groq(
+    *,
+    prompt: str,
+    system: str,
+    tool_executor: Callable,
+    project_dir: str,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+    on_tool_call: Callable | None,
+) -> tuple[str, dict[str, str]]:
+    extra_files: dict[str, str] = {}
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+    response: dict | None = None
+
+    for round_num in range(MAX_TOOL_ROUNDS):
+        logger.info(f"[Agent] Groq round {round_num + 1}/{MAX_TOOL_ROUNDS}")
+        response = await _groq_chat(
+            messages,
+            model=_model(model),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=_groq_tool_schema(),
+        )
+        message = response["choices"][0]["message"]
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            return message.get("content") or "", extra_files
+
+        messages.append({
+            "role": "assistant",
+            "content": message.get("content"),
+            "tool_calls": tool_calls,
+        })
+
+        for call in tool_calls:
+            fn = call.get("function", {})
+            tool_name = fn.get("name", "")
+            try:
+                tool_args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            result = await tool_executor(tool_name, tool_args, project_dir)
+
+            if tool_name == "write_file" and tool_args.get("path") and not result.lower().startswith("error"):
+                from backend.shared.path_security import normalize_relative_path
+                try:
+                    safe_path = normalize_relative_path(tool_args["path"])
+                    extra_files[safe_path] = tool_args.get("content", "")
+                except ValueError:
+                    logger.warning(f"[Agent] Rejected unsafe write_file path: {tool_args['path']!r}")
+
+            if on_tool_call:
+                try:
+                    await on_tool_call(tool_name, tool_args, result)
+                except Exception:
+                    pass
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id"),
+                "content": result[:6000],
+            })
+
+    logger.warning(f"[Agent] Hit max {MAX_TOOL_ROUNDS} Groq tool rounds")
+    if response:
+        return response["choices"][0]["message"].get("content") or "", extra_files
+    return "", extra_files

@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react'
+import React, { Suspense, lazy, useState, useEffect } from 'react'
 import { useWebSocket } from './hooks/useWebSocket'
 import ChatPanel from './components/ChatPanel'
 import WorkflowCanvas from './components/WorkflowCanvas'
-import CodePanel from './components/CodePanel'
 import StatusBar from './components/StatusBar'
 import ApiDiscoveryBadge from './components/ApiDiscoveryBadge'
 import DebugOverlay from './components/DebugOverlay'
+
+const CodePanel = lazy(() => import('./components/CodePanel'))
 // ── Celebration Overlay ──────────────────────────────────────
 function CelebrationOverlay({ show }) {
   if (!show) return null
@@ -167,13 +168,15 @@ export default function App() {
           {/* Code Panel */}
           {showCode && (
             <div className="h-1/2 overflow-hidden">
-              <CodePanel
-                code={code}
-                debugHistory={debugHistory}
-                workflowId={deployedWorkflowId}
-                generatedFiles={generatedFiles}
-                sandboxOutput={sandboxOutput}
-              />
+              <Suspense fallback={<div className="h-full p-4 text-sm text-forge-muted">Loading code view...</div>}>
+                <CodePanel
+                  code={code}
+                  debugHistory={debugHistory}
+                  workflowId={deployedWorkflowId}
+                  generatedFiles={generatedFiles}
+                  sandboxOutput={sandboxOutput}
+                />
+              </Suspense>
             </div>
           )}
         </div>

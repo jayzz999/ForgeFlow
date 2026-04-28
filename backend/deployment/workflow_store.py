@@ -9,6 +9,7 @@ This makes ForgeFlow REAL:
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 from datetime import datetime
@@ -114,6 +115,7 @@ def save_workflow(
     debug_attempts: int = 0,
     services: list[str] | None = None,
     extra_files: dict[str, str] | None = None,
+    artifacts: dict[str, object] | None = None,
 ) -> dict:
     """Save a workflow as a project folder + DB record. Returns metadata."""
     _ensure_dirs()
@@ -212,6 +214,19 @@ make k8s-deploy
     dag_file = os.path.join(project_dir, "dag.json")
     with open(dag_file, "w") as f:
         json.dump(dag, f, indent=2, default=str)
+
+    # 6a. Write structured pipeline artifacts for debugging and audits
+    artifacts_dir = os.path.join(project_dir, "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    artifact_payload = artifacts or {}
+    artifact_payload.setdefault("dag", dag)
+    artifact_payload.setdefault("services", services_list)
+    artifact_payload.setdefault("debug_attempts", debug_attempts)
+    artifact_payload.setdefault("saved_at", datetime.utcnow().isoformat() + "Z")
+    for key, value in artifact_payload.items():
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", key).strip("._") or "artifact"
+        with open(os.path.join(artifacts_dir, f"{safe_name}.json"), "w") as f:
+            json.dump(value, f, indent=2, default=str)
 
     # 7. Write Dockerfile for containerized deployment
     dockerfile = os.path.join(project_dir, "Dockerfile")
@@ -384,7 +399,12 @@ clean:
     db.commit()
     db.close()
 
-    all_files = ["workflow.py", "requirements.txt", ".env.example", "run.sh", "Dockerfile", "docker-compose.yml", "k8s-deployment.yaml", "Makefile", "README.md", "dag.json"] + extra_file_names
+    artifact_files = [
+        os.path.join("artifacts", name)
+        for name in sorted(os.listdir(artifacts_dir))
+        if os.path.isfile(os.path.join(artifacts_dir, name))
+    ]
+    all_files = ["workflow.py", "requirements.txt", ".env.example", "run.sh", "Dockerfile", "docker-compose.yml", "k8s-deployment.yaml", "Makefile", "README.md", "dag.json"] + artifact_files + extra_file_names
 
     return {
         "workflow_id": workflow_id,
@@ -427,3 +447,33 @@ def get_workflow_project_path(workflow_id: str) -> str | None:
     """Get the project folder path for a workflow."""
     path = os.path.join(WORKFLOWS_DIR, workflow_id)
     return path if os.path.exists(path) else None
+
+
+def delete_workflow(workflow_id: str) -> bool:
+    """Delete a workflow project folder and metadata row."""
+    project_path = get_workflow_project_path(workflow_id)
+    db = _get_db()
+    db.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+    db.commit()
+    db.close()
+    if project_path:
+        shutil.rmtree(project_path, ignore_errors=True)
+        return True
+    return False
+
+
+def prune_workflows(keep_latest: int = 50) -> list[str]:
+    """Delete older workflow folders and rows, keeping the newest N records."""
+    keep_latest = max(1, keep_latest)
+    db = _get_db()
+    rows = db.execute(
+        "SELECT id FROM workflows ORDER BY created_at DESC LIMIT -1 OFFSET ?",
+        (keep_latest,),
+    ).fetchall()
+    db.close()
+    deleted = []
+    for row in rows:
+        workflow_id = row["id"]
+        if delete_workflow(workflow_id):
+            deleted.append(workflow_id)
+    return deleted

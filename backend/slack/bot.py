@@ -312,7 +312,7 @@ async def handle_app_home(event, client: AsyncWebClient):
                             "*Example:*\n"
                             "`/forge When the Volatility 75 Index moves more than 2% in 5 minutes, "
                             "send a Slack alert to #trading-alerts, log to Google Sheets, "
-                            "and create a Jira ticket for the risk team`"
+                            "and log the result to Google Sheets`"
                         ),
                     },
                 },

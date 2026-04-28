@@ -4,6 +4,7 @@ import json
 
 from backend.shared.config import settings
 from backend.shared.gemini_client import generate_json, generate_text
+from backend.shared.services import SUPPORTED_SERVICE_LABEL
 
 
 async def extract_requirements(user_request: str, messages: list[dict] | None = None) -> dict:
@@ -24,7 +25,7 @@ async def extract_requirements(user_request: str, messages: list[dict] | None = 
 CRITICAL RULES:
 1. ALWAYS decompose the request into 3-8 CONCRETE action steps — even if the user is vague
 2. For each action, specify a concrete service_hint (Slack, Gmail, Google Sheets, REST API, HTTP, etc.)
-   NOTE: Jira is NOT available. Do NOT suggest Jira. Available services: Slack, Gmail (SMTP), Google Sheets, HTTP/Webhooks.
+   Available services: {supported_services}. Do NOT suggest any unavailable service.
 3. If the user doesn't specify services, INFER the most likely ones for their use case
 4. For vague requests like "automate X", break down into: data collection, processing, notification, logging, tracking steps
 5. Each action description must be specific enough to implement as an API call (e.g., "Send Slack notification to #onboarding channel with welcome message" NOT just "notify team")
@@ -54,7 +55,7 @@ VAGUE examples that NEED clarification (confidence 0.5-0.6):
 
 CLEAR examples that DO NOT need clarification (confidence 0.85+):
   "When V75 moves 2% in 5 min, alert #trading on Slack" → confidence 0.9, no questions
-  "Send a Slack message to #general when a Jira ticket is created in PROJ-123" → confidence 0.85
+  "Check https://example.com every hour, alert #ops on Slack if it fails, and log results to Google Sheets" → confidence 0.85
   "Email john@company.com a PDF report from the Sales Google Sheet every Monday" → confidence 0.9
 
 - Questions must be SPECIFIC and actionable. Ask about: email addresses, channel names, project keys, spreadsheet names, trigger conditions
@@ -98,7 +99,7 @@ OUTPUT ONLY valid JSON:
         {
             "id": "step_1",
             "description": "specific action description with service details",
-            "service_hint": "Slack|Gmail|Jira|Google Sheets|HTTP|SMTP|REST API",
+            "service_hint": "Slack|Gmail|Google Sheets|HTTP|SMTP|REST API",
             "api_type": "rest|websocket|email|http_check",
             "depends_on": [],
             "is_trigger": false,
@@ -111,7 +112,7 @@ OUTPUT ONLY valid JSON:
     "confidence": 0.0-1.0,
     "clarification_needed": ["question if confidence < 0.7"],
     "assumed_defaults": ["what was assumed"]
-}"""
+}""".replace("{supported_services}", SUPPORTED_SERVICE_LABEL)
 
     # Build context from conversation history
     context = ""

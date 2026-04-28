@@ -45,8 +45,26 @@ def test_ast_fallback_does_not_report_execution_success():
     assert "VALIDATION ONLY" in result.stdout
 
 
+def test_workflow_run_env_excludes_llm_keys(monkeypatch):
+    from backend.main import _workflow_run_env
+
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("GROQ_API_KEY", "secret-groq")
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-gemini")
+    monkeypatch.setenv("TARGET_URL", "https://example.com")
+
+    env = _workflow_run_env()
+
+    assert env["SLACK_BOT_TOKEN"] == "xoxb-test"
+    assert env["TARGET_URL"] == "https://example.com"
+    assert "GROQ_API_KEY" not in env
+    assert "GEMINI_API_KEY" not in env
+
+
 @pytest.mark.asyncio
 async def test_tool_loop_records_only_successful_safe_written_files(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "gemini")
+
     class FakeModels:
         def __init__(self):
             self.calls = 0

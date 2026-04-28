@@ -6,17 +6,19 @@ import os
 import chromadb
 
 from backend.shared.config import settings
-from backend.shared.gemini_embeddings import GeminiEmbeddingFunction
 
 _client: chromadb.ClientAPI | None = None
 _collection: chromadb.Collection | None = None
 
 
 def _get_embedding_fn():
-    return GeminiEmbeddingFunction(
-        api_key=settings.GEMINI_API_KEY,
-        model_name="gemini-embedding-001",
-    )
+    if settings.EMBEDDING_PROVIDER == "gemini":
+        from backend.shared.gemini_embeddings import GeminiEmbeddingFunction
+        return GeminiEmbeddingFunction(
+            api_key=settings.GEMINI_API_KEY,
+            model_name=settings.GEMINI_EMBEDDING_MODEL,
+        )
+    return None
 
 
 def get_client() -> chromadb.ClientAPI:
@@ -33,11 +35,12 @@ def get_collection() -> chromadb.Collection:
     global _collection
     if _collection is None:
         client = get_client()
-        _collection = client.get_or_create_collection(
-            name="api_endpoints",
-            embedding_function=_get_embedding_fn(),
-            metadata={"hnsw:space": "cosine"},
-        )
+        embedding_fn = _get_embedding_fn()
+        collection_name = f"api_endpoints_{settings.EMBEDDING_PROVIDER}"
+        kwargs = {"name": collection_name, "metadata": {"hnsw:space": "cosine"}}
+        if embedding_fn is not None:
+            kwargs["embedding_function"] = embedding_fn
+        _collection = client.get_or_create_collection(**kwargs)
     return _collection
 
 

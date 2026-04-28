@@ -73,7 +73,7 @@ export default function ChatPanel({
 
   // Task 8: Load demo prompt
   const loadDemo = () => {
-    setInput("When V75 moves 2% in 5 min, alert #trading-alerts on Slack, log to Google Sheets, and create a Jira ticket")
+    setInput("Check https://example.com every hour, alert #ops on Slack if it fails, and log results to Google Sheets")
   }
 
   const getEventIcon = (eventType) => {
@@ -175,7 +175,7 @@ export default function ChatPanel({
               <p className="text-forge-muted mb-1">Or try:</p>
               <p className="text-forge-text italic">
                 "When V75 moves 2% in 5 min, alert #trading-alerts on Slack,
-                log to Google Sheets, and create a Jira ticket"
+                log results to Google Sheets, and alert Slack on failure"
               </p>
             </div>
           </div>

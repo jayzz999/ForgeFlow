@@ -1,4 +1,4 @@
-"""Fast intent classification using Gemini."""
+"""Fast intent classification using the configured LLM provider."""
 
 import json
 
@@ -18,7 +18,7 @@ INTENT_TYPES = [
 
 
 async def classify_intent(user_message: str) -> dict:
-    """Classify user intent quickly using Gemini.
+    """Classify user intent quickly using the configured LLM provider.
 
     Returns:
         {"intent": str, "confidence": float, "is_modification": bool, "is_status_check": bool}

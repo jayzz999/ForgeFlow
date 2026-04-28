@@ -5,6 +5,7 @@ import json
 from backend.shared.config import settings
 from backend.shared.gemini_client import generate_json
 from backend.shared.models import APIEndpoint, AuthType
+from backend.shared.services import SUPPORTED_SERVICE_LABEL
 
 
 async def select_best_api(
@@ -123,15 +124,15 @@ async def extract_actions(user_request: str) -> list[dict]:
         "business workflow description. Each action should map to a real API call.\n\n"
         "RULES:\n"
         "1. ALWAYS extract at least 3 concrete actions, even for vague requests\n"
-        "2. Each action must specify a real service (Slack, Gmail, Jira, Google Sheets, HTTP, etc.)\n"
+        f"2. Each action must specify a supported service ({SUPPORTED_SERVICE_LABEL})\n"
         "3. Descriptions must be specific enough to search for an API endpoint\n"
         "4. NEVER use generic descriptions like 'process data' — specify exactly what service and what operation\n\n"
         "EXAMPLES:\n"
-        "- 'automate onboarding' → create Jira ticket, send Gmail welcome email, invite to Slack channels, add Google Sheets row\n"
-        "- 'monitor website' → HTTP GET health check, log to Google Sheets, send Slack alert, create Jira incident\n\n"
+        "- 'automate onboarding' → send Gmail welcome email, invite to Slack channels, add Google Sheets row\n"
+        "- 'monitor website' → HTTP GET health check, log to Google Sheets, send Slack alert\n\n"
         "Output ONLY valid JSON with an 'actions' key containing an array:\n"
         '{"actions": [{"id": "step_1", "description": "specific API action with service name", '
-        '"service_hint": "Slack|Gmail|Jira|Google Sheets|HTTP|SMTP", '
+        '"service_hint": "Slack|Gmail|Google Sheets|HTTP|SMTP", '
         '"api_type": "rest|websocket|email|http_check", '
         '"depends_on": [], "is_trigger": false}]}'
     )

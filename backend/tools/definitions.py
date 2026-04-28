@@ -1,6 +1,6 @@
 """Tool definitions for the ForgeFlow agent.
 
-These are Gemini function declarations that the LLM can invoke during
+These are function declarations that the LLM can invoke during
 code generation. This transforms ForgeFlow from a one-shot generator
 into an interactive agent that can browse docs, test APIs, and write
 multi-file projects.

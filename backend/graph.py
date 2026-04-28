@@ -606,6 +606,16 @@ async def deploy_node(state: ForgeFlowState) -> dict:
         debug_attempts=debug_attempts,
         services=services,
         extra_files=extra_files,
+        artifacts={
+            "requirements": requirements,
+            "dag": dag_data,
+            "security_review": state.get("security_review"),
+            "test_results": state.get("test_results"),
+            "execution_result": state.get("execution_result"),
+            "debug_history": state.get("debug_history", []),
+            "discovered_apis": state.get("discovered_apis", []),
+            "data_mappings": state.get("data_mappings", []),
+        },
     )
 
     project_dir = deploy_result["project_dir"]

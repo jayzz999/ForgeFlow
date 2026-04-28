@@ -3,7 +3,6 @@ import React from 'react'
 const SERVICE_COLORS = {
   'Slack': { bg: 'bg-purple-500/20', text: 'text-purple-300', border: 'border-purple-500/30' },
   'Gmail': { bg: 'bg-red-500/20', text: 'text-red-300', border: 'border-red-500/30' },
-  'Jira': { bg: 'bg-blue-500/20', text: 'text-blue-300', border: 'border-blue-500/30' },
   'Google Sheets': { bg: 'bg-green-500/20', text: 'text-green-300', border: 'border-green-500/30' },
 
 }

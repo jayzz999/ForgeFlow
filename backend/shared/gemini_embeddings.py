@@ -1,7 +1,4 @@
-"""Gemini embedding function for ChromaDB.
-
-Replaces OpenAI's text-embedding-3-small with Gemini's gemini-embedding-001.
-"""
+"""Optional Gemini embedding function for ChromaDB."""
 
 from google import genai
 
