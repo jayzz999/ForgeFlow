@@ -17,7 +17,7 @@ class AuthType(str, Enum):
 
 
 class APIEndpoint(BaseModel):
-    service: str  # e.g. "Slack", "Gmail", "Deriv"
+    service: str  # e.g. "Slack", "Gmail", "Google Sheets"
     endpoint: str  # e.g. "/chat.postMessage"
     method: str  # GET, POST, WS
     description: str

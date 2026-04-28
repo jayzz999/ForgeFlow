@@ -416,8 +416,6 @@ async def test_integration(service: str):
             result = await client.list_labels()
         elif service == "sheets":
             return {"status": "configured", "message": "Sheets client ready (needs spreadsheet ID for full test)"}
-        elif service == "deriv":
-            result = await client.get_active_symbols()
         elif service == "http":
             result = await client.health_check("https://httpbin.org/get")
         else:

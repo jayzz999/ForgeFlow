@@ -160,7 +160,7 @@ async def execute_code_docker(
 
         # Collect relevant env vars to pass into the container
         env_prefixes = (
-            "SLACK_", "GMAIL_", "GOOGLE_", "DERIV_",
+            "SLACK_", "GMAIL_", "GOOGLE_",
             "SHEETS_", "WEBHOOK_", "API_", "AUTH_", "TOKEN_",
         )
         env_args = []

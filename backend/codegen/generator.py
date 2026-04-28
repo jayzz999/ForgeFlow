@@ -409,7 +409,7 @@ def _ensure_runnable(code: str, dag: "WorkflowDAG") -> str:
     if not has_main:
         step_calls = ""
         for fn in step_funcs:
-            # Derive the step key (e.g. "step_1") so we can store result in context
+            # Compute the step key (e.g. "step_1") so we can store result in context
             import re as _re
             m = _re.search(r'(step_\d+)', fn)
             step_key = m.group(1) if m else fn
