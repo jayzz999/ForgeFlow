@@ -1,5 +1,6 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react'
 import { useWebSocket } from './hooks/useWebSocket'
+import { useProviderStatus } from './hooks/useForgeFlow'
 import ChatPanel from './components/ChatPanel'
 import WorkflowCanvas from './components/WorkflowCanvas'
 import StatusBar from './components/StatusBar'
@@ -65,6 +66,10 @@ export default function App() {
     sendDemo,
     resetState,
   } = useWebSocket()
+  const {
+    status: providerStatus,
+    error: providerError,
+  } = useProviderStatus()
 
   const [showCode, setShowCode] = useState(true)
   const [showCelebration, setShowCelebration] = useState(false)
@@ -193,6 +198,8 @@ export default function App() {
         discoveredApis={discoveredApis}
         debugHistory={debugHistory}
         events={events}
+        providerStatus={providerStatus}
+        providerError={providerError}
       />
     </div>
   )

@@ -235,6 +235,7 @@ async def provider_status():
         "service": "ForgeFlow",
         "llm": {
             "provider": provider,
+            "fallback_provider": settings.LLM_FALLBACK_PROVIDER,
             "model": llm_providers[provider]["model"],
             "fast_model": llm_providers[provider]["fast_model"],
             "configured": llm_providers[provider]["configured"],

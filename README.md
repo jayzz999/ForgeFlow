@@ -161,8 +161,12 @@ workflows/               # Generated workflow projects
 
 ```env
 LLM_PROVIDER=groq
+LLM_FALLBACK_PROVIDER=gemini
 GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_FAST_MODEL=llama-3.1-8b-instant
+GROQ_MAX_RETRIES=2
+GROQ_RETRY_BASE_SECONDS=1
 
 # Optional Gemini fallback
 GEMINI_API_KEY=

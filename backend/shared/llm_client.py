@@ -7,6 +7,7 @@ All LLM calls go through this module. Provides:
 - get_client() — raw Gemini client access for the optional Gemini provider
 """
 
+import asyncio
 import json
 import logging
 from typing import Callable
@@ -40,13 +41,35 @@ def _provider() -> str:
 
 
 def _model(model: str | None, *, fast: bool = False) -> str:
-    if _provider() == "gemini":
+    return _model_for(_provider(), model, fast=fast)
+
+
+def _model_for(provider: str, model: str | None, *, fast: bool = False) -> str:
+    if provider == "gemini":
         if model and not model.startswith("gemini"):
             model = None
         return model or (settings.GEMINI_FAST_MODEL if fast else settings.GEMINI_MODEL)
     if model and model.startswith("gemini"):
         model = None
     return model or (settings.GROQ_FAST_MODEL if fast else settings.GROQ_MODEL)
+
+
+def _should_fallback_from_groq(exc: Exception) -> bool:
+    if settings.LLM_FALLBACK_PROVIDER != "gemini" or not settings.GEMINI_API_KEY:
+        return False
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    return exc.response.status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+def _retry_delay(exc: httpx.HTTPStatusError, attempt: int) -> float:
+    retry_after = exc.response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(float(retry_after), 8.0)
+        except ValueError:
+            pass
+    return min(settings.GROQ_RETRY_BASE_SECONDS * (2 ** attempt), 8.0)
 
 
 async def _groq_chat(
@@ -74,16 +97,31 @@ async def _groq_chat(
         payload["tool_choice"] = "auto"
 
     async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
-            GROQ_CHAT_URL,
-            headers={
-                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        response.raise_for_status()
-        return response.json()
+        for attempt in range(settings.GROQ_MAX_RETRIES + 1):
+            response = await client.post(
+                GROQ_CHAT_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            try:
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                retryable = exc.response.status_code in {408, 409, 429, 500, 502, 503, 504}
+                if not retryable or attempt >= settings.GROQ_MAX_RETRIES:
+                    raise
+                delay = _retry_delay(exc, attempt)
+                logger.warning(
+                    "Groq request failed with HTTP %s; retrying in %.1fs",
+                    exc.response.status_code,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+    raise RuntimeError("Groq request failed without a response")
 
 
 def _extract_json(text: str) -> dict:
@@ -106,16 +144,22 @@ async def generate_json(
 ) -> dict:
     """Call the configured LLM and return parsed JSON."""
     if _provider() == "groq":
-        response = await _groq_chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt + "\n\nReturn only valid JSON."},
-            ],
-            model=_model(model, fast=True),
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await _groq_chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt + "\n\nReturn only valid JSON."},
+                ],
+                model=_model_for("groq", model, fast=True),
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            if _should_fallback_from_groq(exc):
+                logger.warning("Groq JSON generation failed; falling back to Gemini")
+                return await _generate_json_gemini(prompt, system, model, temperature, max_tokens)
+            raise
         text = response["choices"][0]["message"].get("content") or "{}"
         try:
             return _extract_json(text)
@@ -124,9 +168,19 @@ async def generate_json(
             logger.debug(f"Raw response: {text[:500]}")
             return {}
 
+    return await _generate_json_gemini(prompt, system, model, temperature, max_tokens)
+
+
+async def _generate_json_gemini(
+    prompt: str,
+    system: str,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+) -> dict:
     client = get_client()
     response = await client.aio.models.generate_content(
-        model=_model(model),
+        model=_model_for("gemini", model),
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -153,20 +207,36 @@ async def generate_text(
 ) -> str:
     """Call the configured LLM and return plain text."""
     if _provider() == "groq":
-        response = await _groq_chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            model=_model(model),
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        try:
+            response = await _groq_chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                model=_model_for("groq", model),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            if _should_fallback_from_groq(exc):
+                logger.warning("Groq text generation failed; falling back to Gemini")
+                return await _generate_text_gemini(prompt, system, model, temperature, max_tokens)
+            raise
         return response["choices"][0]["message"].get("content") or ""
 
+    return await _generate_text_gemini(prompt, system, model, temperature, max_tokens)
+
+
+async def _generate_text_gemini(
+    prompt: str,
+    system: str,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+) -> str:
     client = get_client()
     response = await client.aio.models.generate_content(
-        model=_model(model),
+        model=_model_for("gemini", model),
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system,
@@ -210,16 +280,22 @@ async def generate_with_tools(
         {relative_path: content} for any files written via write_file tool.
     """
     if _provider() == "groq":
-        return await _generate_with_tools_groq(
-            prompt=prompt,
-            system=system,
-            tool_executor=tool_executor,
-            project_dir=project_dir,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            on_tool_call=on_tool_call,
-        )
+        try:
+            return await _generate_with_tools_groq(
+                prompt=prompt,
+                system=system,
+                tool_executor=tool_executor,
+                project_dir=project_dir,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_tool_call=on_tool_call,
+            )
+        except Exception as exc:
+            if _should_fallback_from_groq(exc) and tools_config is not None:
+                logger.warning("Groq tool generation failed; falling back to Gemini")
+            else:
+                raise
 
     client = get_client()
     extra_files: dict[str, str] = {}
@@ -231,7 +307,7 @@ async def generate_with_tools(
         logger.info(f"[Agent] Round {round_num + 1}/{MAX_TOOL_ROUNDS}")
 
         response = await client.aio.models.generate_content(
-            model=_model(model),
+            model=_model_for("gemini", model),
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system,
@@ -421,7 +497,7 @@ async def _generate_with_tools_groq(
         logger.info(f"[Agent] Groq round {round_num + 1}/{MAX_TOOL_ROUNDS}")
         response = await _groq_chat(
             messages,
-            model=_model(model),
+            model=_model_for("groq", model),
             temperature=temperature,
             max_tokens=max_tokens,
             tools=_groq_tool_schema(),

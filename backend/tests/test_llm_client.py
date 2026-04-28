@@ -1,5 +1,7 @@
 import json
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from backend.shared import llm_client
@@ -102,3 +104,27 @@ async def test_groq_invalid_json_returns_empty_dict(monkeypatch):
     monkeypatch.setattr(llm_client, "_groq_chat", fake_groq_chat)
 
     assert await llm_client.generate_json("p", "s") == {}
+
+
+@pytest.mark.asyncio
+async def test_groq_429_falls_back_to_gemini_for_json(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
+    monkeypatch.setattr(settings, "LLM_FALLBACK_PROVIDER", "gemini")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "gemini-key")
+
+    request = httpx.Request("POST", llm_client.GROQ_CHAT_URL)
+    response = httpx.Response(429, request=request)
+
+    async def fake_groq_chat(messages, **kwargs):
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    class FakeModels:
+        async def generate_content(self, **kwargs):
+            return SimpleNamespace(text='{"fallback": true}')
+
+    fake_client = SimpleNamespace(aio=SimpleNamespace(models=FakeModels()))
+    monkeypatch.setattr(llm_client, "_groq_chat", fake_groq_chat)
+    monkeypatch.setattr(llm_client, "get_client", lambda: fake_client)
+    monkeypatch.setattr(llm_client.types, "GenerateContentConfig", lambda **kwargs: kwargs)
+
+    assert await llm_client.generate_json("p", "s") == {"fallback": True}

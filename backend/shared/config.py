@@ -6,9 +6,12 @@ load_dotenv()
 
 class Settings:
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").lower()
+    LLM_FALLBACK_PROVIDER: str = os.getenv("LLM_FALLBACK_PROVIDER", "gemini").lower()
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     GROQ_FAST_MODEL: str = os.getenv("GROQ_FAST_MODEL", GROQ_MODEL)
+    GROQ_MAX_RETRIES: int = int(os.getenv("GROQ_MAX_RETRIES", "2"))
+    GROQ_RETRY_BASE_SECONDS: float = float(os.getenv("GROQ_RETRY_BASE_SECONDS", "1"))
 
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")

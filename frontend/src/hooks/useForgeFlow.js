@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -33,4 +33,31 @@ export function useForgeFlow() {
   }, [])
 
   return { forge, loading, result, error }
+}
+
+export function useProviderStatus() {
+  const [status, setStatus] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const resp = await fetch(`${API_URL}/api/status`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      setStatus(await resp.json())
+    } catch (err) {
+      setStatus(null)
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  return { status, loading, error, refresh }
 }
