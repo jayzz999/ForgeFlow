@@ -507,7 +507,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
   const services = providerStatus?.services || {}
   const [oauthResult, setOauthResult] = useState(null)
   const [oauthError, setOauthError] = useState(null)
-  const [callbackForm, setCallbackForm] = useState({ state: '', code: '' })
+  const [callbackForm, setCallbackForm] = useState({ state: '', code: '', exchange: false })
   const [credentialForm, setCredentialForm] = useState({ service: 'slack', label: 'Local Slack token', kind: 'access_token', secret: '' })
 
   const startOAuth = async (service) => {
@@ -518,7 +518,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setOauthResult(payload)
-      setCallbackForm({ state: payload.state, code: '' })
+      setCallbackForm({ state: payload.state, code: '', exchange: false })
       onRefresh()
     } catch (err) {
       setOauthError(err.message)
@@ -531,7 +531,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
       const res = await fetch(`${API_URL}/api/connectors/oauth/callback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(callbackForm),
+        body: JSON.stringify({ ...callbackForm, exchange: Boolean(callbackForm.exchange) }),
       })
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
@@ -602,11 +602,18 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
               {oauthResult.auth_url && <div className="break-all text-xs text-forge-muted">{oauthResult.auth_url}</div>}
               {oauthResult.scopes && <div className="text-xs text-forge-muted">Scopes: {oauthResult.scopes.join(', ')}</div>}
               {oauthResult.missing_env?.length ? <div className="text-xs text-amber-200">Missing OAuth env: {oauthResult.missing_env.join(', ')}</div> : null}
+              {oauthResult.token_exchange?.stored_credentials?.length ? (
+                <div className="text-xs text-emerald-200">Stored tokens: {oauthResult.token_exchange.stored_credentials.map((item) => item.kind).join(', ')}</div>
+              ) : null}
               <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
                 <input value={callbackForm.state} onChange={(event) => setCallbackForm({ ...callbackForm, state: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none" placeholder="state" />
                 <input value={callbackForm.code} onChange={(event) => setCallbackForm({ ...callbackForm, code: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none" placeholder="provider auth code" />
                 <button onClick={completeOAuth} className="rounded-lg border border-sky-400/30 px-3 py-2 text-xs text-sky-200">Record callback</button>
               </div>
+              <label className="inline-flex items-center gap-2 text-xs text-forge-muted">
+                <input type="checkbox" checked={callbackForm.exchange} onChange={(event) => setCallbackForm({ ...callbackForm, exchange: event.target.checked })} />
+                Exchange code server-side and store returned tokens when OAuth client env is configured
+              </label>
             </div>
           )}
         </div>
@@ -622,6 +629,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
                 <span className={`rounded-full px-2 py-1 text-[11px] ${connector.env_status?.configured ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{connector.status}</span>
               </div>
               <p className="mt-2 text-xs text-forge-muted">Auth: {connector.auth_type} · Missing: {connector.env_status?.missing?.join(', ') || 'none'}</p>
+              {connector.metadata?.vault_credential && <p className="mt-1 text-xs text-emerald-300">Vault credential available</p>}
             </div>
           ))}
         </div>
@@ -1174,6 +1182,7 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
   const [target, setTarget] = useState('local_docker')
   const [plan, setPlan] = useState(null)
   const [error, setError] = useState(null)
+  const [dispatching, setDispatching] = useState(false)
   const targetList = targets?.targets || []
 
   const createPlan = async () => {
@@ -1207,6 +1216,26 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
     }
   }
 
+  const dispatchPlan = async (planId) => {
+    setError(null)
+    setDispatching(true)
+    try {
+      const res = await fetch(`${API_URL}/api/deploy/plans/${planId}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'dry_run' }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setPlan((current) => ({ ...(current || {}), job: payload.job }))
+      onPlansRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDispatching(false)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -1222,6 +1251,11 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
             <p className="mt-2 min-h-16 text-xs leading-5 text-forge-muted">{item.description}</p>
             <span className={`mt-3 inline-flex rounded-full px-2 py-1 text-[11px] ${item.status === 'available' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{item.status}</span>
             {item.env_status?.missing?.length ? <div className="mt-2 text-[11px] text-amber-200">Needs {item.env_status.missing.join(', ')}</div> : null}
+            <div className="mt-3 space-y-1">
+              {(item.provider_health?.checks || []).map((check) => (
+                <div key={check.id} className={`text-[11px] ${check.status === 'pass' ? 'text-emerald-300' : 'text-amber-200'}`}>{check.label}: {check.detail}</div>
+              ))}
+            </div>
           </div>
         ))}
       </div>
@@ -1251,7 +1285,17 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
                 {Object.keys(plan.plan.artifacts || {}).map((name) => <div key={name} className="text-xs text-sky-200">{name}</div>)}
               </div>
               <div className="rounded-lg bg-amber-400/10 p-3 text-xs text-amber-200">{plan.plan.next_action}</div>
-              <button onClick={() => activatePlan(plan.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Activate plan</button>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => activatePlan(plan.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Activate plan</button>
+                <button onClick={() => dispatchPlan(plan.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">{dispatching ? 'Preparing...' : 'Prepare provider dispatch'}</button>
+              </div>
+              {plan.job && (
+                <div className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Provider dispatch</div>
+                  <div className="text-xs text-forge-muted">{plan.job.status} · {plan.job.provider_request?.provider} · {plan.job.provider_request?.operation}</div>
+                  {plan.job.blockers?.length ? <div className="mt-2 text-xs text-amber-200">Blocked by {plan.job.blockers.join(', ')}</div> : null}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1291,6 +1335,24 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
                   {Object.keys(activation.artifacts || {}).map((name) => <span key={name} className="rounded bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{name}</span>)}
                   {(activation.blockers || []).map((blocker) => <span key={blocker} className="rounded bg-amber-400/10 px-2 py-1 text-[11px] text-amber-200">{blocker}</span>)}
                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="text-sm font-semibold">Provider dispatch jobs</h3>
+        {(plans?.jobs || []).length === 0 ? <EmptyState title="No dispatch jobs yet" body="Preparing a provider dispatch records the exact external action envelope before any live deploy call." /> : (
+          <div className="mt-4 space-y-2">
+            {plans.jobs.map((job) => (
+              <div key={job.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                  <div className="text-sm">{job.workflow_id} to {job.target}</div>
+                  <span className="text-xs text-forge-muted">{job.status}</span>
+                  <span className="text-xs text-forge-muted">{job.created_at}</span>
+                </div>
+                <div className="mt-2 text-xs text-forge-muted">{job.provider_request?.provider} · {job.provider_request?.operation}</div>
+                {(job.blockers || []).length ? <div className="mt-2 text-xs text-amber-200">{job.blockers.join(', ')}</div> : null}
               </div>
             ))}
           </div>

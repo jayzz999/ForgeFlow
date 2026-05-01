@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 logging.getLogger("slack").setLevel(logging.WARNING)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -317,6 +318,19 @@ def _platform_db() -> sqlite3.Connection:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS deployment_jobs (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            provider_request_json TEXT NOT NULL,
+            provider_response_json TEXT NOT NULL,
+            blockers_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS eval_runs (
             id TEXT PRIMARY KEY,
             suite TEXT NOT NULL,
@@ -476,14 +490,20 @@ def _upsert_connector_state(service: str, status: str, auth_type: str, scopes: l
 
 def _list_connector_states() -> list[dict]:
     status_by_service = {}
+    vault_services = _credential_services()
     for service, info in SUPPORTED_SERVICES.items():
+        env = _env_status(info.get("env_vars", ()))
+        connected = env["configured"] or service in vault_services
+        metadata = {"name": info["name"], "source": "environment"}
+        if service in vault_services:
+            metadata["vault_credential"] = True
         status_by_service[service] = _upsert_connector_state(
             service=service,
-            status="connected" if _env_status(info.get("env_vars", ()))["configured"] else "missing_credentials",
+            status="connected" if connected else "missing_credentials",
             auth_type=info.get("auth_type", "api_key"),
             scopes=_oauth_specs().get(service, {}).get("scopes", []),
             env_vars=info.get("env_vars", ()),
-            metadata={"name": info["name"], "source": "environment"},
+            metadata=metadata,
         )
 
     conn = _platform_db()
@@ -581,6 +601,76 @@ def _list_credentials() -> list[dict]:
             "updated_at": row["updated_at"],
         })
     return credentials
+
+
+def _credential_services() -> set[str]:
+    return {item["service"] for item in _list_credentials() if item.get("valid")}
+
+
+def _oauth_env_readiness(service: str) -> dict:
+    spec = _oauth_specs().get(service)
+    if not spec:
+        return {"available": False, "missing": ["oauth_spec"], "present": []}
+    required = [spec["client_id_env"], spec["client_secret_env"], spec["redirect_uri_env"]]
+    env = _env_status(required)
+    return {"available": env["configured"], **env}
+
+
+def _exchange_oauth_code(service: str, code: str, redirect_uri: str | None = None) -> dict:
+    spec = _oauth_specs().get(service)
+    if not spec:
+        raise HTTPException(status_code=404, detail="OAuth connector not available for this service")
+
+    readiness = _oauth_env_readiness(service)
+    if not readiness["available"]:
+        raise HTTPException(status_code=400, detail=f"Missing OAuth env: {', '.join(readiness['missing'])}")
+
+    data = {
+        "client_id": os.environ[spec["client_id_env"]],
+        "client_secret": os.environ[spec["client_secret_env"]],
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri or os.environ[spec["redirect_uri_env"]],
+    }
+    encoded = urlencode(data).encode("utf-8")
+    request = Request(
+        spec["token_url"],
+        data=encoded,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"OAuth token exchange failed: {exc}")
+
+    if payload.get("error"):
+        detail = payload.get("error_description") or payload.get("error")
+        raise HTTPException(status_code=400, detail=f"OAuth provider rejected token exchange: {detail}")
+
+    stored: list[dict] = []
+    for token_key, kind in (("access_token", "access_token"), ("refresh_token", "refresh_token"), ("authed_user", "authed_user")):
+        token_value = payload.get(token_key)
+        if token_value:
+            stored.append(_store_credential(
+                service,
+                f"{service} {kind}",
+                kind,
+                str(token_value),
+                {"token_response_keys": sorted(payload.keys())},
+            ))
+
+    if not stored:
+        raise HTTPException(status_code=400, detail="OAuth token response did not include a storable token")
+
+    return {
+        "service": service,
+        "stored_credentials": [{"id": item["id"], "label": item["label"], "kind": item["kind"], "masked": item["masked"]} for item in stored],
+        "response_keys": sorted(payload.keys()),
+    }
 
 
 def _trim_output(value: str) -> str:
@@ -1161,6 +1251,51 @@ def _deployment_readiness(workflow_id: str, target_info: dict) -> dict:
     }
 
 
+def _deployment_provider_health() -> list[dict]:
+    credential_services = _credential_services()
+    health = []
+    for target in DEPLOYMENT_TARGETS:
+        env = _env_status(target.get("requires_env", []))
+        checks = []
+        if target["id"] == "local_docker":
+            checks.append({
+                "id": "docker_cli",
+                "label": "Docker CLI",
+                "status": "pass" if shutil.which("docker") else "warn",
+                "detail": "docker is available" if shutil.which("docker") else "docker CLI not found on PATH",
+            })
+        elif target["id"] == "github_actions":
+            checks.append({
+                "id": "github_token",
+                "label": "GitHub API token",
+                "status": "pass" if env["configured"] or "github" in credential_services else "warn",
+                "detail": "GitHub token available" if env["configured"] or "github" in credential_services else "Add GITHUB_TOKEN or store a github credential",
+            })
+        elif target["id"] == "render_worker":
+            checks.append({
+                "id": "render_token",
+                "label": "Render API key",
+                "status": "pass" if env["configured"] or "render" in credential_services else "warn",
+                "detail": "Render API key available" if env["configured"] or "render" in credential_services else "Add RENDER_API_KEY or store a render credential",
+            })
+        elif target["id"] == "webhook_runtime":
+            checks.append({
+                "id": "runtime_base_url",
+                "label": "Runtime base URL",
+                "status": "pass" if os.getenv("FORGEFLOW_RUNTIME_BASE_URL") else "warn",
+                "detail": os.getenv("FORGEFLOW_RUNTIME_BASE_URL") or "Set FORGEFLOW_RUNTIME_BASE_URL for hosted webhook activation",
+            })
+
+        health.append({
+            "id": target["id"],
+            "name": target["name"],
+            "status": "pass" if checks and all(check["status"] == "pass" for check in checks) else "warn",
+            "env_status": env,
+            "checks": checks,
+        })
+    return health
+
+
 def _list_deployment_plans() -> list[dict]:
     conn = _platform_db()
     rows = conn.execute("SELECT * FROM deployment_plans ORDER BY created_at DESC LIMIT 30").fetchall()
@@ -1226,6 +1361,112 @@ def _list_deployment_activations() -> list[dict]:
             "target": row["target"],
             "status": row["status"],
             "artifacts": _json_loads(row["artifacts_json"], {}),
+            "blockers": _json_loads(row["blockers_json"], []),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def _provider_request_for_plan(plan_id: str, plan: dict) -> dict:
+    target = plan.get("target")
+    workflow_id = plan.get("workflow_id")
+    artifacts = plan.get("artifacts", {})
+    if target == "github_actions":
+        return {
+            "provider": "github",
+            "operation": "upsert_workflow_file",
+            "workflow_id": workflow_id,
+            "path": ".github/workflows/forgeflow.yml",
+            "requires_confirmation": True,
+            "artifact_names": list(artifacts.keys()),
+        }
+    if target == "render_worker":
+        return {
+            "provider": "render",
+            "operation": "create_or_update_worker_blueprint",
+            "workflow_id": workflow_id,
+            "requires_confirmation": True,
+            "artifact_names": list(artifacts.keys()),
+        }
+    if target == "webhook_runtime":
+        return {
+            "provider": "forgeflow_runtime",
+            "operation": "publish_webhook_runtime",
+            "workflow_id": workflow_id,
+            "base_url": os.getenv("FORGEFLOW_RUNTIME_BASE_URL", ""),
+            "requires_confirmation": True,
+            "artifact_names": list(artifacts.keys()),
+        }
+    return {
+        "provider": "local",
+        "operation": "prepare_local_docker_command",
+        "workflow_id": workflow_id,
+        "requires_confirmation": False,
+        "artifact_names": list(artifacts.keys()),
+    }
+
+
+def _record_deployment_job(plan_id: str, plan: dict, mode: str = "dry_run") -> dict:
+    readiness = plan.get("readiness", {})
+    blockers = readiness.get("blocking", [])
+    provider_request = _provider_request_for_plan(plan_id, plan)
+    status = "blocked" if blockers else ("prepared" if mode == "dry_run" else "ready_for_provider")
+    provider_response = {
+        "message": "Provider request prepared. External deploy actions require explicit user confirmation.",
+        "live_call_performed": False,
+    }
+    job = {
+        "id": _stable_id("deploy_job", {"plan_id": plan_id, "mode": mode}),
+        "plan_id": plan_id,
+        "workflow_id": plan.get("workflow_id"),
+        "target": plan.get("target"),
+        "status": status,
+        "mode": mode,
+        "provider_request": provider_request,
+        "provider_response": provider_response,
+        "blockers": blockers,
+        "created_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO deployment_jobs
+        (id, plan_id, workflow_id, target, status, mode, provider_request_json, provider_response_json, blockers_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job["id"],
+            job["plan_id"],
+            job["workflow_id"],
+            job["target"],
+            job["status"],
+            job["mode"],
+            json.dumps(job["provider_request"]),
+            json.dumps(job["provider_response"]),
+            json.dumps(job["blockers"]),
+            job["created_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return job
+
+
+def _list_deployment_jobs() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM deployment_jobs ORDER BY created_at DESC LIMIT 30").fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "plan_id": row["plan_id"],
+            "workflow_id": row["workflow_id"],
+            "target": row["target"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "provider_request": _json_loads(row["provider_request_json"], {}),
+            "provider_response": _json_loads(row["provider_response_json"], {}),
             "blockers": _json_loads(row["blockers_json"], []),
             "created_at": row["created_at"],
         }
@@ -1313,6 +1554,9 @@ def _list_eval_runs() -> list[dict]:
 
 def _product_gap_analysis() -> dict:
     connectors = _list_connector_states()
+    credentials = _list_credentials()
+    eval_runs = _list_eval_runs()
+    provider_health = _deployment_provider_health()
     pending_approvals = [item for item in _list_approvals() if item["status"] == "pending"]
     triggers = _list_triggers()
     runs = _collect_run_history(limit=20)
@@ -1330,8 +1574,8 @@ def _product_gap_analysis() -> dict:
         {
             "id": "connector_credentials",
             "label": "Connector credentials",
-            "status": "pass" if any(item["env_status"]["configured"] for item in connectors) else "warn",
-            "detail": "At least one real connector is configured" if any(item["env_status"]["configured"] for item in connectors) else "No real connector credentials configured yet",
+            "status": "pass" if any(item["env_status"]["configured"] or item["metadata"].get("vault_credential") for item in connectors) else "warn",
+            "detail": "At least one real connector is configured" if any(item["env_status"]["configured"] or item["metadata"].get("vault_credential") for item in connectors) else "No real connector credentials configured yet",
         },
         {
             "id": "approval_queue",
@@ -1354,14 +1598,20 @@ def _product_gap_analysis() -> dict:
         {
             "id": "credential_vault",
             "label": "Credential vault",
-            "status": "pass" if _list_credentials() else "warn",
-            "detail": f"{len(_list_credentials())} encrypted credentials stored",
+            "status": "pass" if credentials else "warn",
+            "detail": f"{len(credentials)} encrypted credentials stored",
         },
         {
             "id": "prompt_evals",
             "label": "Prompt evals",
-            "status": "pass" if _list_eval_runs() else "warn",
-            "detail": f"{len(_list_eval_runs())} eval runs recorded",
+            "status": "pass" if eval_runs else "warn",
+            "detail": f"{len(eval_runs)} eval runs recorded",
+        },
+        {
+            "id": "deployment_provider_health",
+            "label": "Deployment provider health",
+            "status": "pass" if any(item["status"] == "pass" for item in provider_health) else "warn",
+            "detail": f"{sum(1 for item in provider_health if item['status'] == 'pass')} provider targets ready",
         },
     ]
     blockers = [item for item in checks if item["status"] != "pass"]
@@ -1882,18 +2132,20 @@ async def trigger_events():
 
 @app.get("/api/deploy/targets")
 async def deployment_targets():
+    health_by_id = {item["id"]: item for item in _deployment_provider_health()}
     targets = []
     for target in DEPLOYMENT_TARGETS:
         targets.append({
             **target,
             "env_status": _env_status(target.get("requires_env", [])),
+            "provider_health": health_by_id.get(target["id"], {}),
         })
     return {"targets": targets}
 
 
 @app.get("/api/deploy/plans")
 async def deployment_plans():
-    return {"plans": _list_deployment_plans(), "activations": _list_deployment_activations()}
+    return {"plans": _list_deployment_plans(), "activations": _list_deployment_activations(), "jobs": _list_deployment_jobs()}
 
 
 @app.post("/api/deploy/plan")
@@ -1951,6 +2203,25 @@ async def activate_deployment_plan(plan_id: str):
     conn.close()
     activation = _record_deployment_activation(plan_id, plan, status)
     return {"id": plan_id, "status": status, "plan": plan, "activation": activation}
+
+
+@app.post("/api/deploy/plans/{plan_id}/dispatch")
+async def dispatch_deployment_plan(plan_id: str, body: dict | None = None):
+    body = body or {}
+    mode = str(body.get("mode", "dry_run")).strip() or "dry_run"
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM deployment_plans WHERE id = ?", (plan_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Deployment plan not found")
+    plan = _json_loads(row["plan_json"], {})
+    job = _record_deployment_job(plan_id, plan, mode)
+    return {"id": plan_id, "job": job}
+
+
+@app.get("/api/deploy/jobs")
+async def deployment_jobs():
+    return {"jobs": _list_deployment_jobs()}
 
 
 @app.get("/api/ingestions")
@@ -2038,6 +2309,7 @@ async def start_oauth_connector(service: str):
         "auth_url": auth_url,
         "scopes": spec["scopes"],
         "status": "ready_for_user_authorization" if client_id else "missing_oauth_client",
+        "oauth_env": _oauth_env_readiness(service),
         "missing_env": [
             name for name in (spec["client_id_env"], spec["client_secret_env"], spec["redirect_uri_env"])
             if not os.getenv(name, "")
@@ -2098,20 +2370,28 @@ async def complete_oauth_connector(body: dict):
     conn.execute("UPDATE oauth_sessions SET status = 'callback_received', updated_at = ? WHERE state = ?", (now, state))
     conn.commit()
     conn.close()
+    token_exchange = None
+    if body.get("exchange"):
+        token_exchange = _exchange_oauth_code(service, code, body.get("redirect_uri"))
+        conn = _platform_db()
+        conn.execute("UPDATE oauth_sessions SET status = 'tokens_stored', updated_at = ? WHERE state = ?", (_now_iso(), state))
+        conn.commit()
+        conn.close()
     connector = _upsert_connector_state(
         service=service,
-        status="authorization_code_received",
+        status="tokens_stored" if token_exchange else "authorization_code_received",
         auth_type="oauth2",
         scopes=_json_loads(session["scopes_json"], []),
         env_vars=spec.get("env_vars", []) if spec else [],
         metadata={
             "state": state,
             "code_received": True,
-            "token_exchange": "pending_server_side_secret_exchange",
+            "token_exchange": "complete" if token_exchange else "pending_server_side_secret_exchange",
             "token_url": spec.get("token_url") if spec else None,
+            "stored_credentials": token_exchange.get("stored_credentials", []) if token_exchange else [],
         },
     )
-    return {"service": service, "status": connector["status"], "connector": connector}
+    return {"service": service, "status": connector["status"], "connector": connector, "token_exchange": token_exchange}
 
 
 @app.get("/api/evals/suites")

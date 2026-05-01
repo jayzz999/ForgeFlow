@@ -732,3 +732,60 @@ def test_deployment_activation_is_recorded(monkeypatch, tmp_path):
     assert activation["status"] == "blocked"
     assert activations[0]["artifacts"] == {".github/workflows/forgeflow.yml": "name: test"}
     assert activations[0]["blockers"] == ["workflow_project_missing"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_callback_exchanges_and_stores_tokens(monkeypatch, tmp_path):
+    from backend import main
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"access_token":"ya29-access-token","refresh_token":"refresh-secret","expires_in":3600}'
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "http://localhost/callback")
+    monkeypatch.setattr(main, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    started = await main.start_oauth_connector("gmail")
+    completed = await main.complete_oauth_connector({
+        "state": started["state"],
+        "code": "provider-code",
+        "exchange": True,
+    })
+    credentials = main._list_credentials()
+
+    assert completed["status"] == "tokens_stored"
+    assert {item["kind"] for item in completed["token_exchange"]["stored_credentials"]} == {"access_token", "refresh_token"}
+    assert {item["kind"] for item in credentials} == {"access_token", "refresh_token"}
+    assert "ya29-access-token" not in str(completed)
+
+
+def test_deployment_dispatch_records_provider_request(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    job = main._record_deployment_job(
+        "plan_1",
+        {
+            "workflow_id": "workflow_1",
+            "target": "render_worker",
+            "artifacts": {"render.yaml": "services: []"},
+            "readiness": {"blocking": ["target_credentials_missing"]},
+        },
+        "dry_run",
+    )
+    jobs = main._list_deployment_jobs()
+
+    assert job["status"] == "blocked"
+    assert jobs[0]["provider_request"]["provider"] == "render"
+    assert jobs[0]["provider_request"]["operation"] == "create_or_update_worker_blueprint"
+    assert jobs[0]["provider_response"]["live_call_performed"] is False
