@@ -587,3 +587,79 @@ async def test_trigger_and_deployment_plan_are_persisted(monkeypatch, tmp_path):
     assert triggers["triggers"][0]["config"] == {"path": "/webhooks/hr"}
     assert plan["status"] == "planned"
     assert plan["plan"]["steps"][-1] == "Activate trigger or runtime"
+
+
+@pytest.mark.asyncio
+async def test_connector_oauth_lifecycle_records_callback(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("SLACK_CLIENT_ID", "client-id")
+    monkeypatch.setenv("SLACK_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("SLACK_OAUTH_REDIRECT_URI", "http://localhost/callback")
+
+    started = await main.start_oauth_connector("slack")
+    lifecycle = await main.connector_lifecycle()
+    completed = await main.complete_oauth_connector({"state": started["state"], "code": "temporary-code"})
+    lifecycle_after = await main.connector_lifecycle()
+
+    assert started["status"] == "ready_for_user_authorization"
+    assert "client-id" in started["auth_url"]
+    assert lifecycle["oauth_sessions"][0]["status"] == "started"
+    assert completed["status"] == "authorization_code_received"
+    assert lifecycle_after["oauth_sessions"][0]["status"] == "callback_received"
+
+
+@pytest.mark.asyncio
+async def test_trigger_activation_and_inactive_webhook_event(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    trigger = await main.create_trigger({
+        "workflow_id": "workflow_hr",
+        "trigger_type": "webhook",
+        "config": {"path": "/webhooks/hr"},
+    })
+    inactive = await main.invoke_webhook_trigger(trigger["id"], {"candidate": "Ada"})
+    active = await main.update_trigger_state(trigger["id"], "activate")
+    events = await main.trigger_events()
+
+    assert inactive["accepted"] is False
+    assert inactive["event"]["status"] == "ignored_inactive"
+    assert active["status"] == "active"
+    assert events["events"][0]["payload"] == {"candidate": "Ada"}
+
+
+@pytest.mark.asyncio
+async def test_active_webhook_records_failed_run_for_missing_workflow(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    trigger = await main.create_trigger({
+        "workflow_id": "missing_workflow",
+        "trigger_type": "webhook",
+        "config": {"path": "/webhooks/missing"},
+    })
+    await main.update_trigger_state(trigger["id"], "activate")
+    result = await main.invoke_webhook_trigger(trigger["id"], {"event": "test"})
+    events = await main.trigger_events()
+    run = await main.run_detail(result["run"]["run_id"])
+
+    assert result["accepted"] is True
+    assert result["event"]["status"] == "failed"
+    assert result["run"]["success"] is False
+    assert events["events"][0]["run_id"] == result["run"]["run_id"]
+    assert run["stderr"] == "Workflow not found"
+
+
+def test_product_gap_analysis_reports_score(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    gaps = main._product_gap_analysis()
+
+    assert 0 <= gaps["score"] <= 100
+    assert {check["id"] for check in gaps["checks"]} >= {"grounded_capabilities", "connector_credentials", "approval_queue"}

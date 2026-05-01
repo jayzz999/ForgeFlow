@@ -14,6 +14,7 @@ import io
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import urlencode
 
 logging.getLogger("slack").setLevel(logging.WARNING)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -160,6 +161,7 @@ DEPLOYMENT_TARGETS = [
         "status": "planned",
         "description": "Commit workflow project and run it on a schedule in GitHub Actions.",
         "requires": ["GitHub repo", "secrets"],
+        "requires_env": ["GITHUB_TOKEN"],
     },
     {
         "id": "render_worker",
@@ -167,6 +169,7 @@ DEPLOYMENT_TARGETS = [
         "status": "planned",
         "description": "Deploy the workflow as a persistent Render worker with managed env vars.",
         "requires": ["Render account", "secrets"],
+        "requires_env": ["RENDER_API_KEY"],
     },
     {
         "id": "webhook_runtime",
@@ -243,6 +246,38 @@ def _platform_db() -> sqlite3.Connection:
             plan_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS connector_states (
+            service TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            auth_type TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            env_status_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS oauth_sessions (
+            state TEXT PRIMARY KEY,
+            service TEXT NOT NULL,
+            status TEXT NOT NULL,
+            auth_url TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS trigger_events (
+            id TEXT PRIMARY KEY,
+            trigger_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            run_id TEXT,
+            created_at TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -256,6 +291,142 @@ def _now_iso() -> str:
 def _stable_id(prefix: str, payload: object | None = None) -> str:
     raw = json.dumps(payload or {}, sort_keys=True, default=str) + _now_iso() + str(uuid.uuid4())
     return f"{prefix}_{hashlib.sha1(raw.encode()).hexdigest()[:10]}"
+
+
+def _json_loads(value: str | None, fallback):
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+
+def _oauth_specs() -> dict[str, dict]:
+    return {
+        "gmail": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "client_id_env": "GOOGLE_CLIENT_ID",
+            "client_secret_env": "GOOGLE_CLIENT_SECRET",
+            "redirect_uri_env": "GOOGLE_OAUTH_REDIRECT_URI",
+            "scopes": ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"],
+            "env_vars": ["GMAIL_ACCESS_TOKEN", "GMAIL_SENDER_EMAIL"],
+        },
+        "sheets": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "client_id_env": "GOOGLE_CLIENT_ID",
+            "client_secret_env": "GOOGLE_CLIENT_SECRET",
+            "redirect_uri_env": "GOOGLE_OAUTH_REDIRECT_URI",
+            "scopes": ["https://www.googleapis.com/auth/spreadsheets"],
+            "env_vars": ["GOOGLE_SHEETS_ACCESS_TOKEN"],
+        },
+        "slack": {
+            "auth_url": "https://slack.com/oauth/v2/authorize",
+            "token_url": "https://slack.com/api/oauth.v2.access",
+            "client_id_env": "SLACK_CLIENT_ID",
+            "client_secret_env": "SLACK_CLIENT_SECRET",
+            "redirect_uri_env": "SLACK_OAUTH_REDIRECT_URI",
+            "scopes": ["chat:write", "channels:read", "users:read.email"],
+            "env_vars": ["SLACK_BOT_TOKEN"],
+        },
+    }
+
+
+def _env_status(env_vars: list[str] | tuple[str, ...]) -> dict:
+    present = [name for name in env_vars if bool(os.getenv(name, ""))]
+    missing = [name for name in env_vars if name not in present]
+    return {
+        "configured": not missing,
+        "present": present,
+        "missing": missing,
+    }
+
+
+def _upsert_connector_state(service: str, status: str, auth_type: str, scopes: list[str], env_vars: list[str] | tuple[str, ...], metadata: dict | None = None) -> dict:
+    now = _now_iso()
+    env = _env_status(env_vars)
+    conn = _platform_db()
+    existing = conn.execute("SELECT created_at FROM connector_states WHERE service = ?", (service,)).fetchone()
+    created_at = existing["created_at"] if existing else now
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO connector_states
+        (service, status, auth_type, scopes_json, env_status_json, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            service,
+            status,
+            auth_type,
+            json.dumps(scopes),
+            json.dumps(env),
+            json.dumps(metadata or {}),
+            created_at,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "service": service,
+        "status": status,
+        "auth_type": auth_type,
+        "scopes": scopes,
+        "env_status": env,
+        "metadata": metadata or {},
+        "created_at": created_at,
+        "updated_at": now,
+    }
+
+
+def _list_connector_states() -> list[dict]:
+    status_by_service = {}
+    for service, info in SUPPORTED_SERVICES.items():
+        status_by_service[service] = _upsert_connector_state(
+            service=service,
+            status="connected" if _env_status(info.get("env_vars", ()))["configured"] else "missing_credentials",
+            auth_type=info.get("auth_type", "api_key"),
+            scopes=_oauth_specs().get(service, {}).get("scopes", []),
+            env_vars=info.get("env_vars", ()),
+            metadata={"name": info["name"], "source": "environment"},
+        )
+
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM connector_states ORDER BY service ASC").fetchall()
+    conn.close()
+    for row in rows:
+        item = dict(row)
+        status_by_service[item["service"]] = {
+            "service": item["service"],
+            "status": item["status"],
+            "auth_type": item["auth_type"],
+            "scopes": _json_loads(item["scopes_json"], []),
+            "env_status": _json_loads(item["env_status_json"], {"configured": False, "present": [], "missing": []}),
+            "metadata": _json_loads(item["metadata_json"], {}),
+            "created_at": item["created_at"],
+            "updated_at": item["updated_at"],
+        }
+    return list(status_by_service.values())
+
+
+def _list_oauth_sessions() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM oauth_sessions ORDER BY created_at DESC LIMIT 20").fetchall()
+    conn.close()
+    return [
+        {
+            "state": row["state"],
+            "service": row["service"],
+            "status": row["status"],
+            "auth_url": row["auth_url"],
+            "scopes": _json_loads(row["scopes_json"], []),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
 
 
 def _trim_output(value: str) -> str:
@@ -479,6 +650,27 @@ def _record_run_log(workflow_id: str, result: dict, attempt: int = 1) -> dict:
     return {"run_id": run_id, "status": status}
 
 
+def _get_run_log(run_id: str) -> dict | None:
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    item = dict(row)
+    return {
+        "run_id": item["id"],
+        "workflow_id": item["workflow_id"],
+        "status": item["status"],
+        "success": item["status"] == "success",
+        "stdout": item["stdout"] or "",
+        "stderr": item["stderr"] or "",
+        "execution_time": item["execution_time"],
+        "return_code": item["return_code"],
+        "attempt": item["attempt"],
+        "created_at": item["created_at"],
+    }
+
+
 def _list_approvals() -> list[dict]:
     conn = _platform_db()
     rows = conn.execute("SELECT * FROM approvals ORDER BY created_at DESC").fetchall()
@@ -489,6 +681,81 @@ def _list_approvals() -> list[dict]:
         item["preview"] = json.loads(item.pop("preview_json"))
         approvals_data.append(item)
     return approvals_data
+
+
+def _list_triggers() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM triggers ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [
+        {
+            **dict(row),
+            "config": _json_loads(row["config_json"], {}),
+        }
+        for row in rows
+    ]
+
+
+def _get_trigger(trigger_id: str) -> dict | None:
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM triggers WHERE id = ?", (trigger_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    item = dict(row)
+    item["config"] = _json_loads(item.pop("config_json"), {})
+    return item
+
+
+def _record_trigger_event(trigger_id: str, workflow_id: str, event_type: str, payload: dict, status: str, run_id: str | None = None) -> dict:
+    event_id = _stable_id("trigger_event", {"trigger_id": trigger_id, "status": status})
+    event = {
+        "id": event_id,
+        "trigger_id": trigger_id,
+        "workflow_id": workflow_id,
+        "event_type": event_type,
+        "payload": payload,
+        "status": status,
+        "run_id": run_id,
+        "created_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO trigger_events
+        (id, trigger_id, workflow_id, event_type, payload_json, status, run_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event["id"],
+            event["trigger_id"],
+            event["workflow_id"],
+            event["event_type"],
+            json.dumps(payload),
+            event["status"],
+            event["run_id"],
+            event["created_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return event
+
+
+def _list_trigger_events(limit: int = 30) -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute(
+        "SELECT * FROM trigger_events ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            **dict(row),
+            "payload": _json_loads(row["payload_json"], {}),
+        }
+        for row in rows
+    ]
 
 
 def _all_capabilities() -> list[dict]:
@@ -576,6 +843,162 @@ def _store_ingestion(source_type: str, name: str, summary: dict, capabilities_da
         "name": name,
         "summary": summary,
         "capabilities": capabilities_data,
+    }
+
+
+def _deployment_artifacts(workflow_id: str, target: str) -> dict:
+    if target == "github_actions":
+        return {
+            ".github/workflows/forgeflow.yml": "\n".join([
+                "name: ForgeFlow Automation",
+                "on:",
+                "  workflow_dispatch:",
+                "  schedule:",
+                "    - cron: '*/15 * * * *'",
+                "jobs:",
+                "  run:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - uses: actions/checkout@v4",
+                "      - uses: actions/setup-python@v5",
+                "        with:",
+                "          python-version: '3.11'",
+                f"      - run: cd workflows/{workflow_id} && pip install -r requirements.txt && python workflow.py",
+            ]),
+        }
+    if target == "render_worker":
+        return {
+            "render.yaml": "\n".join([
+                "services:",
+                f"  - name: forgeflow-{workflow_id}",
+                "    type: worker",
+                "    env: python",
+                "    buildCommand: pip install -r requirements.txt",
+                "    startCommand: python workflow.py",
+                "    autoDeploy: false",
+            ]),
+        }
+    if target == "webhook_runtime":
+        return {
+            "webhook-runtime.py": "\n".join([
+                "from fastapi import FastAPI, Request",
+                "import subprocess",
+                "",
+                "app = FastAPI()",
+                "",
+                "@app.post('/run')",
+                "async def run(request: Request):",
+                "    payload = await request.json()",
+                "    result = subprocess.run(['python', 'workflow.py'], capture_output=True, text=True, timeout=120)",
+                "    return {'payload': payload, 'return_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}",
+            ]),
+        }
+    return {
+        "docker-run.sh": "\n".join([
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"docker build -t forgeflow-{workflow_id} .",
+            f"docker run --env-file .env forgeflow-{workflow_id}",
+        ]),
+    }
+
+
+def _deployment_readiness(workflow_id: str, target_info: dict) -> dict:
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    required_files = ["workflow.py", "requirements.txt", "Dockerfile"]
+    present_files = [
+        file_name for file_name in required_files
+        if project_path and os.path.exists(os.path.join(project_path, file_name))
+    ]
+    missing_files = [file_name for file_name in required_files if file_name not in present_files]
+    env = _env_status(target_info.get("requires_env", []))
+    blocking = []
+    if not project_path:
+        blocking.append("workflow_project_missing")
+    if missing_files:
+        blocking.append("required_files_missing")
+    if not env["configured"]:
+        blocking.append("target_credentials_missing")
+    return {
+        "project_found": bool(project_path),
+        "present_files": present_files,
+        "missing_files": missing_files,
+        "env": env,
+        "blocking": blocking,
+        "ready": not blocking,
+    }
+
+
+def _list_deployment_plans() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM deployment_plans ORDER BY created_at DESC LIMIT 30").fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "workflow_id": row["workflow_id"],
+            "target": row["target"],
+            "status": row["status"],
+            "plan": _json_loads(row["plan_json"], {}),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def _product_gap_analysis() -> dict:
+    connectors = _list_connector_states()
+    pending_approvals = [item for item in _list_approvals() if item["status"] == "pending"]
+    triggers = _list_triggers()
+    runs = _collect_run_history(limit=20)
+    ingested_count = len(_all_capabilities()) - len(CAPABILITY_REGISTRY)
+    active_triggers = [item for item in triggers if item["status"] == "active"]
+    failed_runs = [item for item in runs if not item["success"]]
+
+    checks = [
+        {
+            "id": "grounded_capabilities",
+            "label": "OpenAPI/MCP capabilities",
+            "status": "pass" if ingested_count > 0 else "warn",
+            "detail": f"{ingested_count} imported capabilities available",
+        },
+        {
+            "id": "connector_credentials",
+            "label": "Connector credentials",
+            "status": "pass" if any(item["env_status"]["configured"] for item in connectors) else "warn",
+            "detail": "At least one real connector is configured" if any(item["env_status"]["configured"] for item in connectors) else "No real connector credentials configured yet",
+        },
+        {
+            "id": "approval_queue",
+            "label": "Approval queue",
+            "status": "pass",
+            "detail": f"{len(pending_approvals)} pending approvals",
+        },
+        {
+            "id": "active_triggers",
+            "label": "Trigger activation",
+            "status": "pass" if active_triggers else "warn",
+            "detail": f"{len(active_triggers)} active triggers",
+        },
+        {
+            "id": "run_reliability",
+            "label": "Run reliability",
+            "status": "pass" if runs and not failed_runs else "warn",
+            "detail": f"{len(runs)} logged runs, {len(failed_runs)} failed or needs-review runs",
+        },
+    ]
+    blockers = [item for item in checks if item["status"] != "pass"]
+    return {
+        "score": round((len(checks) - len(blockers)) / len(checks) * 100),
+        "checks": checks,
+        "blockers": blockers,
+        "next": [
+            "Complete OAuth token exchange and encrypted refresh-token storage.",
+            "Activate at least one real scheduled or webhook workflow.",
+            "Run prompt evals against real business fixtures before claiming broad automation coverage.",
+        ],
     }
 
 
@@ -862,6 +1285,12 @@ async def product_overview():
     }
 
 
+@app.get("/api/product/gaps")
+async def product_gaps():
+    """Return product self-assessment against production automation readiness."""
+    return _product_gap_analysis()
+
+
 @app.get("/api/capabilities")
 async def capabilities():
     """List typed capabilities the planner should compose before custom code."""
@@ -878,6 +1307,15 @@ async def templates():
 async def run_history():
     """Return recent local workflow execution artifacts."""
     return {"runs": _collect_run_history(limit=30)}
+
+
+@app.get("/api/runs/{run_id}")
+async def run_detail(run_id: str):
+    """Return stdout/stderr and retry metadata for one persisted run."""
+    run = _get_run_log(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 @app.get("/api/approvals")
@@ -947,17 +1385,9 @@ async def decide_approval(approval_id: str, decision: str):
 
 @app.get("/api/triggers")
 async def list_triggers():
-    conn = _platform_db()
-    rows = conn.execute("SELECT * FROM triggers ORDER BY created_at DESC").fetchall()
-    conn.close()
     return {
-        "triggers": [
-            {
-                **dict(row),
-                "config": json.loads(row["config_json"]),
-            }
-            for row in rows
-        ]
+        "triggers": _list_triggers(),
+        "events": _list_trigger_events(),
     }
 
 
@@ -991,9 +1421,81 @@ async def create_trigger(body: dict):
     return {"id": trigger_id, "status": body.get("status", "paused")}
 
 
+@app.post("/api/triggers/{trigger_id}/{action}")
+async def update_trigger_state(trigger_id: str, action: str):
+    if action not in {"activate", "pause"}:
+        raise HTTPException(status_code=400, detail="Action must be activate or pause")
+    status = "active" if action == "activate" else "paused"
+    conn = _platform_db()
+    cur = conn.execute(
+        "UPDATE triggers SET status = ?, updated_at = ? WHERE id = ?",
+        (status, _now_iso(), trigger_id),
+    )
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    return {"id": trigger_id, "status": status}
+
+
+@app.post("/api/webhooks/{trigger_id}")
+async def invoke_webhook_trigger(trigger_id: str, body: dict):
+    trigger = _get_trigger(trigger_id)
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    if trigger["status"] != "active":
+        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "ignored_inactive")
+        return {"accepted": False, "event": event, "message": "Trigger is paused"}
+    event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "running")
+    try:
+        result = await _execute_workflow_project(trigger["workflow_id"])
+        run_meta = _record_run_log(trigger["workflow_id"], result)
+        status = "success" if result.get("success") else "failed"
+        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, status, run_meta["run_id"])
+        return {"accepted": True, "event": event, "run": {**result, **run_meta}}
+    except HTTPException as exc:
+        result = {
+            "success": False,
+            "stdout": "",
+            "stderr": exc.detail,
+            "execution_time": 0.0,
+            "return_code": -1,
+        }
+        run_meta = _record_run_log(trigger["workflow_id"], result)
+        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "failed", run_meta["run_id"])
+        return {"accepted": True, "event": event, "run": {**result, **run_meta}}
+    except Exception as exc:
+        result = {
+            "success": False,
+            "stdout": "",
+            "stderr": str(exc),
+            "execution_time": 0.0,
+            "return_code": -1,
+        }
+        run_meta = _record_run_log(trigger["workflow_id"], result)
+        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "failed", run_meta["run_id"])
+        return {"accepted": True, "event": event, "run": {**result, **run_meta}}
+
+
+@app.get("/api/triggers/events")
+async def trigger_events():
+    return {"events": _list_trigger_events()}
+
+
 @app.get("/api/deploy/targets")
 async def deployment_targets():
-    return {"targets": DEPLOYMENT_TARGETS}
+    targets = []
+    for target in DEPLOYMENT_TARGETS:
+        targets.append({
+            **target,
+            "env_status": _env_status(target.get("requires_env", [])),
+        })
+    return {"targets": targets}
+
+
+@app.get("/api/deploy/plans")
+async def deployment_plans():
+    return {"plans": _list_deployment_plans()}
 
 
 @app.post("/api/deploy/plan")
@@ -1005,10 +1507,14 @@ async def create_deployment_plan(body: dict):
     target_info = next((item for item in DEPLOYMENT_TARGETS if item["id"] == target), None)
     if not target_info:
         raise HTTPException(status_code=400, detail="Unknown deployment target")
+    readiness = _deployment_readiness(workflow_id, target_info)
+    artifacts = _deployment_artifacts(workflow_id, target)
     plan = {
         "workflow_id": workflow_id,
         "target": target,
         "target_status": target_info["status"],
+        "readiness": readiness,
+        "artifacts": artifacts,
         "steps": [
             "Validate workflow project files",
             "Verify required secrets are present",
@@ -1016,7 +1522,7 @@ async def create_deployment_plan(body: dict):
             "Build deployment artifact",
             "Activate trigger or runtime",
         ],
-        "next_action": "run local Docker commands" if target == "local_docker" else "connect deployment provider credentials",
+        "next_action": "ready_to_activate" if readiness["ready"] else "resolve readiness blockers",
     }
     plan_id = _stable_id("deploy", plan)
     conn = _platform_db()
@@ -1031,6 +1537,21 @@ async def create_deployment_plan(body: dict):
     conn.commit()
     conn.close()
     return {"id": plan_id, "status": "planned", "plan": plan}
+
+
+@app.post("/api/deploy/plans/{plan_id}/activate")
+async def activate_deployment_plan(plan_id: str):
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM deployment_plans WHERE id = ?", (plan_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Deployment plan not found")
+    plan = _json_loads(row["plan_json"], {})
+    status = "ready" if plan.get("readiness", {}).get("ready") else "blocked"
+    conn.execute("UPDATE deployment_plans SET status = ? WHERE id = ?", (status, plan_id))
+    conn.commit()
+    conn.close()
+    return {"id": plan_id, "status": status, "plan": plan}
 
 
 @app.get("/api/ingestions")
@@ -1082,32 +1603,90 @@ async def ingest_mcp(body: dict):
 async def start_oauth_connector(service: str):
     """Return an OAuth start scaffold without storing credentials."""
     service = service.lower()
-    oauth_specs = {
-        "gmail": {
-            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
-            "scopes": ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"],
-        },
-        "sheets": {
-            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
-            "scopes": ["https://www.googleapis.com/auth/spreadsheets"],
-        },
-        "slack": {
-            "auth_url": "https://slack.com/oauth/v2/authorize",
-            "scopes": ["chat:write", "channels:read", "users:read.email"],
-        },
-    }
-    spec = oauth_specs.get(service)
+    spec = _oauth_specs().get(service)
     if not spec:
         raise HTTPException(status_code=404, detail="OAuth connector not available for this service")
     state = _stable_id("oauth", {"service": service})
+    client_id = os.getenv(spec["client_id_env"], "")
+    redirect_uri = os.getenv(spec["redirect_uri_env"], "http://127.0.0.1:8000/api/connectors/oauth/callback")
+    query = {
+        "client_id": client_id or f"missing-{spec['client_id_env']}",
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(spec["scopes"]),
+        "state": state,
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    if service == "slack":
+        query["scope"] = ",".join(spec["scopes"])
+    auth_url = f"{spec['auth_url']}?{urlencode(query)}"
+    now = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO oauth_sessions
+        (state, service, status, auth_url, scopes_json, created_at, updated_at)
+        VALUES (?, ?, 'started', ?, ?, ?, ?)
+        """,
+        (state, service, auth_url, json.dumps(spec["scopes"]), now, now),
+    )
+    conn.commit()
+    conn.close()
     return {
         "service": service,
         "state": state,
-        "auth_url": spec["auth_url"],
+        "auth_url": auth_url,
         "scopes": spec["scopes"],
-        "status": "ready_for_user_authorization",
-        "message": "Open this URL in a browser flow when real OAuth client IDs are configured.",
+        "status": "ready_for_user_authorization" if client_id else "missing_oauth_client",
+        "missing_env": [
+            name for name in (spec["client_id_env"], spec["client_secret_env"], spec["redirect_uri_env"])
+            if not os.getenv(name, "")
+        ],
+        "message": "OAuth session created. Complete callback after provider authorization.",
     }
+
+
+@app.get("/api/connectors")
+async def connector_lifecycle():
+    return {
+        "connectors": _list_connector_states(),
+        "oauth_sessions": _list_oauth_sessions(),
+    }
+
+
+@app.post("/api/connectors/oauth/callback")
+async def complete_oauth_connector(body: dict):
+    """Record OAuth callback completion without exposing or returning token values."""
+    state = str(body.get("state", "")).strip()
+    code = str(body.get("code", "")).strip()
+    if not state or not code:
+        raise HTTPException(status_code=400, detail="state and code are required")
+    conn = _platform_db()
+    session = conn.execute("SELECT * FROM oauth_sessions WHERE state = ?", (state,)).fetchone()
+    if not session:
+        conn.close()
+        raise HTTPException(status_code=404, detail="OAuth session not found")
+    service = session["service"]
+    spec = _oauth_specs().get(service)
+    now = _now_iso()
+    conn.execute("UPDATE oauth_sessions SET status = 'callback_received', updated_at = ? WHERE state = ?", (now, state))
+    conn.commit()
+    conn.close()
+    connector = _upsert_connector_state(
+        service=service,
+        status="authorization_code_received",
+        auth_type="oauth2",
+        scopes=_json_loads(session["scopes_json"], []),
+        env_vars=spec.get("env_vars", []) if spec else [],
+        metadata={
+            "state": state,
+            "code_received": True,
+            "token_exchange": "pending_server_side_secret_exchange",
+            "token_url": spec.get("token_url") if spec else None,
+        },
+    )
+    return {"service": service, "status": connector["status"], "connector": connector}
 
 
 @app.post("/api/schemas/inspect")

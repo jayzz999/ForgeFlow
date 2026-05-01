@@ -502,10 +502,11 @@ function BuilderView(props) {
   )
 }
 
-function ConnectorsView({ providerStatus, capabilities }) {
+function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRefresh }) {
   const services = providerStatus?.services || {}
   const [oauthResult, setOauthResult] = useState(null)
   const [oauthError, setOauthError] = useState(null)
+  const [callbackForm, setCallbackForm] = useState({ state: '', code: '' })
 
   const startOAuth = async (service) => {
     setOauthError(null)
@@ -515,6 +516,25 @@ function ConnectorsView({ providerStatus, capabilities }) {
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setOauthResult(payload)
+      setCallbackForm({ state: payload.state, code: '' })
+      onRefresh()
+    } catch (err) {
+      setOauthError(err.message)
+    }
+  }
+
+  const completeOAuth = async () => {
+    setOauthError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/connectors/oauth/callback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(callbackForm),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setOauthResult(payload)
+      onRefresh()
     } catch (err) {
       setOauthError(err.message)
     }
@@ -558,13 +578,46 @@ function ConnectorsView({ providerStatus, capabilities }) {
         <div className={`rounded-lg border p-4 text-sm ${oauthError ? 'border-red-400/30 bg-red-400/10 text-red-300' : 'border-sky-400/30 bg-sky-400/10 text-sky-100'}`}>
           {oauthError ? oauthError : (
             <div className="space-y-2">
-              <div className="font-medium">{oauthResult.service} authorization scaffold ready</div>
-              <div className="break-all text-xs text-forge-muted">{oauthResult.auth_url}</div>
-              <div className="text-xs text-forge-muted">Scopes: {oauthResult.scopes.join(', ')}</div>
+              <div className="font-medium">{oauthResult.service} authorization {oauthResult.status}</div>
+              {oauthResult.auth_url && <div className="break-all text-xs text-forge-muted">{oauthResult.auth_url}</div>}
+              {oauthResult.scopes && <div className="text-xs text-forge-muted">Scopes: {oauthResult.scopes.join(', ')}</div>}
+              {oauthResult.missing_env?.length ? <div className="text-xs text-amber-200">Missing OAuth env: {oauthResult.missing_env.join(', ')}</div> : null}
+              <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input value={callbackForm.state} onChange={(event) => setCallbackForm({ ...callbackForm, state: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none" placeholder="state" />
+                <input value={callbackForm.code} onChange={(event) => setCallbackForm({ ...callbackForm, code: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none" placeholder="provider auth code" />
+                <button onClick={completeOAuth} className="rounded-lg border border-sky-400/30 px-3 py-2 text-xs text-sky-200">Record callback</button>
+              </div>
             </div>
           )}
         </div>
       )}
+
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="mb-4 text-sm font-semibold">Connector lifecycle</h3>
+        <div className="grid gap-2 md:grid-cols-2">
+          {(connectorLifecycle?.connectors || []).map((connector) => (
+            <div key={connector.service} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium">{connector.metadata?.name || connector.service}</div>
+                <span className={`rounded-full px-2 py-1 text-[11px] ${connector.env_status?.configured ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{connector.status}</span>
+              </div>
+              <p className="mt-2 text-xs text-forge-muted">Auth: {connector.auth_type} · Missing: {connector.env_status?.missing?.join(', ') || 'none'}</p>
+            </div>
+          ))}
+        </div>
+        {(connectorLifecycle?.oauth_sessions || []).length > 0 && (
+          <div className="mt-5">
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Recent OAuth sessions</h4>
+            <div className="space-y-2">
+              {connectorLifecycle.oauth_sessions.map((session) => (
+                <div key={session.state} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3 text-xs text-forge-muted">
+                  {session.service} · {session.status} · {session.state}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
         <h3 className="mb-4 text-sm font-semibold">Capability registry</h3>
@@ -793,6 +846,7 @@ function ApprovalsView({ approvals, onRefresh }) {
 }
 
 function RunsView({ runs, onRefresh }) {
+  const [selectedRun, setSelectedRun] = useState(null)
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -801,13 +855,20 @@ function RunsView({ runs, onRefresh }) {
         description="Every generated automation needs a visible audit trail: inputs, tests, status, logs, retries, and replay."
       />
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-        <RunList runs={runs?.runs || []} onRefresh={onRefresh} />
+        <RunList runs={runs?.runs || []} onRefresh={onRefresh} onSelectRun={setSelectedRun} />
       </div>
+      {selectedRun && (
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Run log detail</h3>
+          <div className="mt-2 text-xs text-forge-muted">{selectedRun.run_id} · attempt {selectedRun.attempt} · return {selectedRun.return_code}</div>
+          <pre className="mt-4 max-h-72 overflow-auto rounded-lg bg-black/30 p-4 text-xs text-forge-muted">{`STDOUT\n${selectedRun.stdout || ''}\n\nSTDERR\n${selectedRun.stderr || ''}`}</pre>
+        </div>
+      )}
     </div>
   )
 }
 
-function RunList({ runs, onRefresh }) {
+function RunList({ runs, onRefresh, onSelectRun }) {
   const [retrying, setRetrying] = useState(null)
   const [error, setError] = useState(null)
 
@@ -826,6 +887,18 @@ function RunList({ runs, onRefresh }) {
     }
   }
 
+  const loadRun = async (runId) => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runs/${runId}`)
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onSelectRun(payload)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   if (!runs?.length) return <EmptyState title="No runs recorded" body="Run a workflow to populate operational history." />
   return (
     <div className="space-y-2">
@@ -840,9 +913,12 @@ function RunList({ runs, onRefresh }) {
           </span>
           <span className="text-xs text-forge-muted">{run.tests_passed}/{run.tests_total} tests</span>
           {run.run_id && (
-            <button onClick={() => retryRun(run.run_id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">
-              {retrying === run.run_id ? 'Retrying...' : 'Retry'}
-            </button>
+            <div className="flex gap-2">
+              <button onClick={() => loadRun(run.run_id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Logs</button>
+              <button onClick={() => retryRun(run.run_id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">
+                {retrying === run.run_id ? 'Retrying...' : 'Retry'}
+              </button>
+            </div>
           )}
         </div>
       ))}
@@ -871,6 +947,34 @@ function TriggersView({ triggers, onRefresh }) {
           config: JSON.parse(form.config || '{}'),
           status: 'paused',
         }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const setTriggerState = async (triggerId, action) => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/triggers/${triggerId}/${action}`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const invokeTrigger = async (triggerId) => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/webhooks/${triggerId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'manual-ui-test', sent_at: new Date().toISOString() }),
       })
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
@@ -918,17 +1022,40 @@ function TriggersView({ triggers, onRefresh }) {
                   </div>
                   <div className="mt-1 text-xs text-forge-muted">{trigger.trigger_type} · {trigger.created_at}</div>
                   <pre className="mt-3 max-h-24 overflow-auto rounded-lg bg-black/20 p-3 text-xs text-forge-muted">{JSON.stringify(trigger.config || {}, null, 2)}</pre>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button onClick={() => setTriggerState(trigger.id, trigger.status === 'active' ? 'pause' : 'activate')} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">
+                      {trigger.status === 'active' ? 'Pause' : 'Activate'}
+                    </button>
+                    <button onClick={() => invokeTrigger(trigger.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">
+                      Invoke webhook
+                    </button>
+                    <span className="rounded-lg bg-forge-panel px-3 py-2 text-xs text-forge-muted">POST /api/webhooks/{trigger.id}</span>
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </div>
       </div>
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="text-sm font-semibold">Trigger events</h3>
+        {(triggers?.events || []).length === 0 ? <EmptyState title="No trigger events" body="Webhook and schedule invocations will appear here with run links." /> : (
+          <div className="mt-4 space-y-2">
+            {triggers.events.map((event) => (
+              <div key={event.id} className="grid gap-2 rounded-lg border border-forge-border bg-forge-bg/50 p-3 md:grid-cols-[1fr_auto_auto]">
+                <div className="text-sm">{event.workflow_id}</div>
+                <span className="text-xs text-forge-muted">{event.status}</span>
+                <span className="text-xs text-forge-muted">{event.created_at}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
-function DeploymentsView({ targets }) {
+function DeploymentsView({ targets, plans, onPlansRefresh }) {
   const [workflowId, setWorkflowId] = useState('workflow-demo')
   const [target, setTarget] = useState('local_docker')
   const [plan, setPlan] = useState(null)
@@ -947,6 +1074,20 @@ function DeploymentsView({ targets }) {
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setPlan(payload)
+      onPlansRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const activatePlan = async (planId) => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/deploy/plans/${planId}/activate`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setPlan(payload)
+      onPlansRefresh()
     } catch (err) {
       setError(err.message)
     }
@@ -966,6 +1107,7 @@ function DeploymentsView({ targets }) {
             <div className="text-sm font-semibold">{item.label || item.name}</div>
             <p className="mt-2 min-h-16 text-xs leading-5 text-forge-muted">{item.description}</p>
             <span className={`mt-3 inline-flex rounded-full px-2 py-1 text-[11px] ${item.status === 'available' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{item.status}</span>
+            {item.env_status?.missing?.length ? <div className="mt-2 text-[11px] text-amber-200">Needs {item.env_status.missing.join(', ')}</div> : null}
           </div>
         ))}
       </div>
@@ -989,10 +1131,36 @@ function DeploymentsView({ targets }) {
             <div className="mt-4 space-y-3">
               <div className="text-sm font-medium">{plan.plan.workflow_id} to {plan.plan.target}</div>
               {plan.plan.steps.map((step) => <ReadinessRow key={step} label={step} value="required" ok />)}
+              {(plan.plan.readiness?.blocking || []).map((blocker) => <ReadinessRow key={blocker} label={blocker} value="blocking" ok={false} />)}
+              <div className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Artifacts</div>
+                {Object.keys(plan.plan.artifacts || {}).map((name) => <div key={name} className="text-xs text-sky-200">{name}</div>)}
+              </div>
               <div className="rounded-lg bg-amber-400/10 p-3 text-xs text-amber-200">{plan.plan.next_action}</div>
+              <button onClick={() => activatePlan(plan.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Activate plan</button>
             </div>
           )}
         </div>
+      </div>
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="text-sm font-semibold">Recent deployment plans</h3>
+        {(plans?.plans || []).length === 0 ? <EmptyState title="No deployment plans" body="Generate a deployment plan to track production readiness." /> : (
+          <div className="mt-4 space-y-2">
+            {plans.plans.map((item) => (
+              <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                  <div className="text-sm">{item.workflow_id} to {item.target}</div>
+                  <span className="text-xs text-forge-muted">{item.status}</span>
+                  <span className="text-xs text-forge-muted">{item.created_at}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {Object.keys(item.plan?.artifacts || {}).map((name) => <span key={name} className="rounded bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{name}</span>)}
+                  {(item.plan?.readiness?.blocking || []).map((blocker) => <span key={blocker} className="rounded bg-amber-400/10 px-2 py-1 text-[11px] text-amber-200">{blocker}</span>)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1094,7 +1262,7 @@ function TemplatesView({ templates, onNavigate }) {
   )
 }
 
-function RoadmapView() {
+function RoadmapView({ gaps }) {
   const phases = [
     ['Grounding', 'MCP adapter, OpenAPI ingestion, file/database schema discovery, credential broker, smart missing-info questions.'],
     ['Reliability', 'Typed capability planner, deterministic tests, live credential checks, approval preview, failure self-repair.'],
@@ -1116,6 +1284,28 @@ function RoadmapView() {
             <p className="mt-3 text-sm leading-6 text-forge-muted">{body}</p>
           </div>
         ))}
+      </div>
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Product readiness self-check</h3>
+          <span className="rounded-full bg-sky-400/10 px-3 py-1 text-xs text-sky-200">{gaps?.score ?? 0}%</span>
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          {(gaps?.checks || []).map((check) => (
+            <div key={check.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium">{check.label}</div>
+                <span className={`rounded-full px-2 py-1 text-[11px] ${check.status === 'pass' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{check.status}</span>
+              </div>
+              <p className="mt-2 text-xs text-forge-muted">{check.detail}</p>
+            </div>
+          ))}
+        </div>
+        {gaps?.next?.length ? (
+          <div className="mt-5 space-y-2">
+            {gaps.next.map((item) => <ReadinessRow key={item} label={item} value="next" ok={false} />)}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -1141,7 +1331,10 @@ function AppWorkspace({ onLanding }) {
   const templates = useApiResource('/api/templates', { templates: [] })
   const triggers = useApiResource('/api/triggers', { triggers: [] })
   const deploymentTargets = useApiResource('/api/deploy/targets', { targets: [] })
+  const deploymentPlans = useApiResource('/api/deploy/plans', { plans: [] })
   const ingestions = useApiResource('/api/ingestions', { ingestions: [] })
+  const connectorLifecycle = useApiResource('/api/connectors', { connectors: [], oauth_sessions: [] })
+  const gaps = useApiResource('/api/product/gaps', { score: 0, checks: [], blockers: [], next: [] })
 
   const activeLabel = useMemo(() => NAV_ITEMS.find((item) => item.id === activeView)?.label || 'Workspace', [activeView])
 
@@ -1191,15 +1384,15 @@ function AppWorkspace({ onLanding }) {
         <main className="min-h-0 flex-1 overflow-auto p-6">
           {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={setActiveView} />}
           {activeView === 'builder' && <BuilderView {...ws} />}
-          {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} />}
+          {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} />}
           {activeView === 'schemas' && <SchemaExplorerView />}
           {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} onRefresh={approvals.refetch} />}
           {activeView === 'triggers' && <TriggersView triggers={triggers.data} onRefresh={triggers.refetch} />}
-          {activeView === 'deployments' && <DeploymentsView targets={deploymentTargets.data} />}
+          {activeView === 'deployments' && <DeploymentsView targets={deploymentTargets.data} plans={deploymentPlans.data} onPlansRefresh={deploymentPlans.refetch} />}
           {activeView === 'runs' && <RunsView runs={runs.data} onRefresh={runs.refetch} />}
           {activeView === 'ingestions' && <IngestionsView ingestions={ingestions.data} onCapabilitiesRefresh={capabilities.refetch} onIngestionsRefresh={ingestions.refetch} />}
           {activeView === 'templates' && <TemplatesView templates={templates.data} onNavigate={setActiveView} />}
-          {activeView === 'roadmap' && <RoadmapView />}
+          {activeView === 'roadmap' && <RoadmapView gaps={gaps.data} />}
         </main>
 
         <StatusBar
