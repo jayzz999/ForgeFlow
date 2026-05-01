@@ -10,6 +10,7 @@ import {
   Database,
   FileSpreadsheet,
   Gauge,
+  Gamepad2,
   GitBranch,
   History,
   Home,
@@ -42,6 +43,7 @@ const CodePanel = lazy(() => import('./components/CodePanel'))
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', Icon: LayoutDashboard },
   { id: 'builder', label: 'Builder', Icon: Workflow },
+  { id: 'appbuilder', label: 'App Builder', Icon: Gamepad2 },
   { id: 'runtime', label: 'Runtime', Icon: Activity },
   { id: 'judge', label: 'Judge Demo', Icon: Sparkles },
   { id: 'connectors', label: 'Connectors', Icon: Blocks },
@@ -501,6 +503,101 @@ function BuilderView(props) {
       </div>
 
       {debugHistory.length > 0 && phase === 'testing' && <DebugOverlay debugHistory={debugHistory} />}
+    </div>
+  )
+}
+
+function AppBuilderView({ builds, onBuildsRefresh }) {
+  const [prompt, setPrompt] = useState('Build a playable tic tac toe game app with score tracking, a reset button, and a clean responsive UI.')
+  const [build, setBuild] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const generateApp = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/app-builder/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setBuild(payload.build)
+      onBuildsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const latest = build || builds?.builds?.[0]
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="App Builder Mode"
+        title="Plain English to runnable software"
+        description="This lane is for apps, games, websites, and product interfaces. It should not be forced through the automation workflow DAG."
+      />
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Software prompt</h3>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={7}
+            className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm leading-6 outline-none focus:border-sky-400/50"
+          />
+          <button onClick={generateApp} disabled={loading} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200 disabled:opacity-50">
+            <Gamepad2 size={16} /> {loading ? 'Generating...' : 'Generate app'}
+          </button>
+          {error && <div className="mt-4 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-300">{error}</div>}
+          {latest && (
+            <div className="mt-5 space-y-3">
+              <ReadinessRow label="Detected lane" value={latest.intent?.lane || 'app_builder'} ok={latest.intent?.lane === 'app_builder'} />
+              <ReadinessRow label="Runnable artifact" value={latest.entry} ok />
+              <ReadinessRow label="Generated files" value={String(latest.files?.length || 0)} ok />
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Live preview</h3>
+          {!latest ? <EmptyState title="No app generated" body="Generate a Tic Tac Toe app to test the new software-building lane." /> : (
+            <iframe
+              title={`${latest.title} preview`}
+              srcDoc={latest.preview_html}
+              sandbox="allow-scripts"
+              className="mt-4 h-[520px] w-full rounded-lg border border-forge-border bg-white"
+            />
+          )}
+        </div>
+      </div>
+
+      {latest && (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+            <h3 className="text-sm font-semibold">Generated files</h3>
+            <div className="mt-4 space-y-2">
+              {latest.files.map((file) => (
+                <div key={file.path} className="flex items-center justify-between rounded-lg border border-forge-border bg-forge-bg/50 px-3 py-2">
+                  <span className="font-mono text-xs text-forge-text">{file.path}</span>
+                  <span className="text-xs text-forge-muted">{file.size} bytes</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+            <h3 className="text-sm font-semibold">What this proves</h3>
+            <div className="mt-4 space-y-2">
+              {(latest.next_steps || []).map((step) => <ReadinessRow key={step} label={step} value="next" ok={step.includes('Preview')} />)}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -2259,6 +2356,7 @@ function AppWorkspace({ onLanding }) {
   const approvals = useApiResource('/api/approvals', { pending: [], policy: [] })
   const runs = useApiResource('/api/runs', { runs: [] })
   const templates = useApiResource('/api/templates', { templates: [] })
+  const appBuilds = useApiResource('/api/app-builder/builds', { builds: [] })
   const triggers = useApiResource('/api/triggers', { triggers: [] })
   const deploymentTargets = useApiResource('/api/deploy/targets', { targets: [] })
   const deploymentPlans = useApiResource('/api/deploy/plans', { plans: [] })
@@ -2325,6 +2423,7 @@ function AppWorkspace({ onLanding }) {
         <main className="min-h-0 flex-1 overflow-auto p-6">
           {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={navigateView} />}
           {activeView === 'builder' && <BuilderView {...ws} />}
+          {activeView === 'appbuilder' && <AppBuilderView builds={appBuilds.data} onBuildsRefresh={appBuilds.refetch} />}
           {activeView === 'runtime' && <RuntimeView specs={specs.data} adapters={connectorAdapters.data} runtimeRuns={runtimeRuns.data} onSpecsRefresh={specs.refetch} onRunsRefresh={runtimeRuns.refetch} onGapsRefresh={gaps.refetch} />}
           {activeView === 'judge' && <JudgeDemoView />}
           {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} />}

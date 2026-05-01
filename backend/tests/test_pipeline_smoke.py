@@ -986,6 +986,21 @@ def test_staging_profile_is_draft_first(monkeypatch, tmp_path):
     assert {item["service"] for item in profile["destinations"]} >= {"gmail", "slack", "sheets", "calendar", "http"}
 
 
+def test_app_builder_generates_playable_tic_tac_toe(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "APP_BUILDS_DIR", str(tmp_path / "app_builds"))
+
+    build = main._generate_app_build("I need a tic tac toe playing game app with score tracking.")
+
+    assert build["intent"]["lane"] == "app_builder"
+    assert build["type"] == "game"
+    assert {item["path"] for item in build["files"]} == {"index.html", "styles.css", "app.js"}
+    assert "winningLine" in (tmp_path / "app_builds" / build["id"] / "app.js").read_text()
+    assert "<iframe" not in build["preview_html"]
+    assert main._list_app_builds()[0]["id"] == build["id"]
+
+
 @pytest.mark.asyncio
 async def test_judge_demo_covers_end_to_end_staging(monkeypatch, tmp_path):
     from backend import main

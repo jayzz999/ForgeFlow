@@ -70,6 +70,7 @@ RUN_ENV_PREFIXES = (
 RUN_ENV_EXACT = {"TARGET_URL"}
 MAX_RUN_OUTPUT_CHARS = 12000
 PLATFORM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "forgeflow_platform.db")
+APP_BUILDS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app_builds")
 
 CAPABILITY_REGISTRY = BASE_CAPABILITIES
 
@@ -2665,6 +2666,373 @@ async def _run_judge_demo(prompt: str | None = None) -> dict:
     }
 
 
+def _classify_build_intent(prompt: str) -> dict:
+    text = prompt.lower()
+    app_markers = ("app", "game", "website", "site", "dashboard", "frontend", "web app", "landing page", "todo", "tic tac toe")
+    automation_markers = ("automate", "workflow", "slack", "gmail", "sheets", "api", "approval", "onboarding", "trigger")
+    app_score = sum(1 for marker in app_markers if marker in text)
+    automation_score = sum(1 for marker in automation_markers if marker in text)
+    if app_score > automation_score:
+        return {
+            "lane": "app_builder",
+            "confidence": min(0.95, 0.65 + app_score * 0.08),
+            "reason": "The request asks for an interactive software product instead of a business workflow.",
+        }
+    return {
+        "lane": "automation_builder",
+        "confidence": min(0.95, 0.65 + automation_score * 0.06),
+        "reason": "The request is best handled as a connector-backed business automation.",
+    }
+
+
+def _tic_tac_toe_files(title: str) -> dict[str, str]:
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="game-panel" aria-label="Tic Tac Toe game">
+        <div class="header">
+          <div>
+            <p class="eyebrow">Playable app build</p>
+            <h1>{title}</h1>
+          </div>
+          <button id="reset" type="button">New game</button>
+        </div>
+        <div id="status" class="status" role="status">Player X starts</div>
+        <div id="board" class="board" aria-label="Game board"></div>
+        <div class="scorebar" aria-label="Scoreboard">
+          <span>X wins <strong id="score-x">0</strong></span>
+          <span>Draws <strong id="score-draw">0</strong></span>
+          <span>O wins <strong id="score-o">0</strong></span>
+        </div>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>
+"""
+    css = """* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0b1020;
+  color: #edf5ff;
+}
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.game-panel {
+  width: min(92vw, 520px);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  background: #111827;
+  padding: 20px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: #7dd3fc;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  background: #7dd3fc;
+  color: #06111c;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+#reset {
+  min-width: 104px;
+  padding: 10px 14px;
+}
+
+.status {
+  margin: 20px 0 14px;
+  border: 1px solid rgba(125, 211, 252, 0.2);
+  border-radius: 8px;
+  background: rgba(14, 165, 233, 0.1);
+  padding: 12px;
+  color: #bae6fd;
+  font-weight: 700;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.cell {
+  aspect-ratio: 1;
+  min-height: 92px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  background: #0f172a;
+  color: #f8fafc;
+  font-size: clamp(38px, 12vw, 72px);
+  line-height: 1;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.cell:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: #7dd3fc;
+  background: #13213a;
+}
+
+.cell:disabled {
+  cursor: default;
+}
+
+.cell.win {
+  border-color: #34d399;
+  background: rgba(16, 185, 129, 0.18);
+  color: #a7f3d0;
+}
+
+.scorebar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.scorebar span {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  padding: 10px;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.scorebar strong {
+  display: block;
+  margin-top: 4px;
+  color: #f8fafc;
+  font-size: 20px;
+}
+"""
+    js = """const boardEl = document.querySelector("#board");
+const statusEl = document.querySelector("#status");
+const resetEl = document.querySelector("#reset");
+const scoreXEl = document.querySelector("#score-x");
+const scoreOEl = document.querySelector("#score-o");
+const scoreDrawEl = document.querySelector("#score-draw");
+
+const wins = [
+  [0, 1, 2],
+  [3, 4, 5],
+  [6, 7, 8],
+  [0, 3, 6],
+  [1, 4, 7],
+  [2, 5, 8],
+  [0, 4, 8],
+  [2, 4, 6],
+];
+
+let board = Array(9).fill("");
+let player = "X";
+let gameOver = false;
+let score = { X: 0, O: 0, draw: 0 };
+
+function render() {
+  boardEl.innerHTML = "";
+  board.forEach((value, index) => {
+    const button = document.createElement("button");
+    button.className = "cell";
+    button.type = "button";
+    button.textContent = value;
+    button.ariaLabel = `Cell ${index + 1}${value ? ` occupied by ${value}` : ""}`;
+    button.disabled = Boolean(value) || gameOver;
+    button.addEventListener("click", () => play(index));
+    boardEl.appendChild(button);
+  });
+}
+
+function winningLine() {
+  return wins.find(([a, b, c]) => board[a] && board[a] === board[b] && board[a] === board[c]);
+}
+
+function play(index) {
+  if (board[index] || gameOver) return;
+  board[index] = player;
+  const line = winningLine();
+  if (line) {
+    gameOver = true;
+    score[player] += 1;
+    statusEl.textContent = `Player ${player} wins`;
+    render();
+    line.forEach((cellIndex) => boardEl.children[cellIndex].classList.add("win"));
+    updateScore();
+    return;
+  }
+  if (board.every(Boolean)) {
+    gameOver = true;
+    score.draw += 1;
+    statusEl.textContent = "Draw game";
+    updateScore();
+    render();
+    return;
+  }
+  player = player === "X" ? "O" : "X";
+  statusEl.textContent = `Player ${player}'s turn`;
+  render();
+}
+
+function updateScore() {
+  scoreXEl.textContent = score.X;
+  scoreOEl.textContent = score.O;
+  scoreDrawEl.textContent = score.draw;
+}
+
+function reset() {
+  board = Array(9).fill("");
+  player = "X";
+  gameOver = false;
+  statusEl.textContent = "Player X starts";
+  render();
+}
+
+resetEl.addEventListener("click", reset);
+render();
+"""
+    return {"index.html": html, "styles.css": css, "app.js": js}
+
+
+def _generic_app_files(title: str, prompt: str) -> dict[str, str]:
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <style>
+      * {{ box-sizing: border-box; }}
+      body {{ margin: 0; min-height: 100vh; font-family: Inter, system-ui, sans-serif; background: #0b1020; color: #f8fafc; }}
+      main {{ max-width: 880px; margin: 0 auto; padding: 48px 24px; }}
+      section {{ border: 1px solid rgba(148, 163, 184, .24); border-radius: 8px; background: #111827; padding: 24px; }}
+      h1 {{ margin: 0 0 12px; font-size: 34px; }}
+      p {{ color: #94a3b8; line-height: 1.7; }}
+      button {{ border: 0; border-radius: 8px; background: #7dd3fc; color: #06111c; padding: 12px 16px; font-weight: 800; cursor: pointer; }}
+      #output {{ margin-top: 18px; border-radius: 8px; background: #0f172a; padding: 16px; color: #bae6fd; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <h1>{title}</h1>
+        <p>{prompt}</p>
+        <button id="action" type="button">Run interaction</button>
+        <div id="output">Ready</div>
+      </section>
+    </main>
+    <script>
+      const output = document.querySelector("#output");
+      document.querySelector("#action").addEventListener("click", () => {{
+        output.textContent = "Interaction complete. This is the first generated app-builder artifact.";
+      }});
+    </script>
+  </body>
+</html>
+"""
+    return {"index.html": html}
+
+
+def _inline_app_preview(files: dict[str, str]) -> str:
+    html = files["index.html"]
+    if "styles.css" in files:
+        html = html.replace('<link rel="stylesheet" href="./styles.css" />', f"<style>\n{files['styles.css']}\n</style>")
+    if "app.js" in files:
+        html = html.replace('<script src="./app.js"></script>', f"<script>\n{files['app.js']}\n</script>")
+    return html
+
+
+def _generate_app_build(prompt: str) -> dict:
+    clean_prompt = prompt.strip()
+    if not clean_prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    intent = _classify_build_intent(clean_prompt)
+    title = "Tic Tac Toe" if "tic tac toe" in clean_prompt.lower() else "Generated App"
+    files = _tic_tac_toe_files(title) if "tic tac toe" in clean_prompt.lower() else _generic_app_files(title, clean_prompt)
+    build_id = _stable_id("app_build", {"prompt": clean_prompt, "files": sorted(files)})
+    build_dir = os.path.join(APP_BUILDS_DIR, build_id)
+    os.makedirs(build_dir, exist_ok=True)
+    for path, content in files.items():
+        full_path = os.path.join(build_dir, path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    manifest = {
+        "id": build_id,
+        "prompt": clean_prompt,
+        "intent": intent,
+        "title": title,
+        "type": "game" if "tic tac toe" in clean_prompt.lower() else "web_app",
+        "entry": "index.html",
+        "files": [{"path": path, "size": len(content)} for path, content in files.items()],
+        "preview_html": _inline_app_preview(files),
+        "created_at": _now_iso(),
+        "status": "generated",
+        "next_steps": [
+            "Preview the app in the App Builder tab.",
+            "Ask for natural-language changes.",
+            "Promote to a Vite/React project when the direction is approved.",
+            "Run browser QA and deploy to Vercel/Render.",
+        ],
+    }
+    with open(os.path.join(build_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump({**manifest, "preview_html": ""}, handle, indent=2)
+    return manifest
+
+
+def _list_app_builds() -> list[dict]:
+    if not os.path.isdir(APP_BUILDS_DIR):
+        return []
+    builds = []
+    for build_id in os.listdir(APP_BUILDS_DIR):
+        manifest_path = os.path.join(APP_BUILDS_DIR, build_id, "manifest.json")
+        if not os.path.exists(manifest_path):
+            continue
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            builds.append(_json_loads(handle.read(), {}))
+    return sorted(builds, key=lambda item: item.get("created_at", ""), reverse=True)
+
+
 def _extract_openapi_capabilities(spec: dict) -> list[dict]:
     title = spec.get("info", {}).get("title", "OpenAPI")
     capabilities_data = []
@@ -3684,6 +4052,18 @@ async def judge_challenge_demo(body: dict | None = None):
     """Run the end-to-end staging demo packet for live judging."""
     body = body or {}
     return await _run_judge_demo(body.get("prompt"))
+
+
+@app.get("/api/app-builder/builds")
+async def app_builder_builds():
+    """List generated app-builder artifacts."""
+    return {"builds": _list_app_builds()}
+
+
+@app.post("/api/app-builder/generate")
+async def app_builder_generate(body: dict):
+    """Generate a runnable app artifact from plain English instead of a workflow DAG."""
+    return {"build": _generate_app_build(str(body.get("prompt", "")))}
 
 
 @app.get("/api/templates")

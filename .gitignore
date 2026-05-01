@@ -42,6 +42,7 @@ Thumbs.db
 
 # Generated workflows (keep structure, ignore generated files)
 workflows/*/
+app_builds/
 
 # Temp
 /tmp/
