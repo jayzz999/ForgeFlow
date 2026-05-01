@@ -221,3 +221,101 @@ async def test_pipeline_fails_before_codegen_for_empty_dag(monkeypatch):
     assert result["deployed"] is False
     assert result["generated_code"] is None
     assert "no executable steps" in result["final_message"]
+
+
+@pytest.mark.asyncio
+async def test_http_prompt_falls_back_when_llm_is_unavailable(monkeypatch):
+    from backend.conversation import engine
+
+    async def fail_generate_json(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(engine, "generate_json", fail_generate_json)
+
+    requirements = await engine.extract_requirements(
+        "GET https://example.com, measure latency_ms, print status_code and healthy JSON. Do not ask questions."
+    )
+
+    assert requirements["workflow_name"] == "HTTP Health Check"
+    assert requirements["confidence"] > 0.9
+    assert requirements["clarification_needed"] == []
+    assert requirements["actions"][0]["service_hint"] == "HTTP"
+    assert requirements["actions"][0]["inputs"]["url"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_http_fallback_dag_gets_real_api(monkeypatch):
+    from backend.planner import dag_builder
+
+    async def fail_generate_json(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(dag_builder, "generate_json", fail_generate_json)
+
+    dag = await dag_builder.build_dag(
+        {
+            "workflow_name": "HTTP Health Check",
+            "description": "Check example.com",
+            "actions": [
+                {
+                    "id": "step_1",
+                    "description": "Send an HTTP GET request to https://example.com",
+                    "service_hint": "HTTP",
+                    "api_type": "http_check",
+                    "inputs": {"url": "https://example.com"},
+                }
+            ],
+        },
+        [],
+    )
+
+    assert len(dag.steps) == 1
+    assert dag.steps[0].api is not None
+    assert dag.steps[0].api.service == "HTTP"
+    assert dag.steps[0].api.auth_type == AuthType.NONE
+    assert dag.steps[0].inputs["url"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_http_fallback_codegen_is_runnable_code(monkeypatch):
+    from backend.codegen import generator
+
+    async def fail_generate_with_tools(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    async def fail_generate_text(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(generator, "generate_with_tools", fail_generate_with_tools)
+    monkeypatch.setattr(generator, "generate_text", fail_generate_text)
+
+    dag = WorkflowDAG(
+        id="http",
+        name="HTTP Health Check",
+        description="Check example.com",
+        trigger={"type": "manual"},
+        steps=[
+            WorkflowStep(
+                id="step_1",
+                name="GET example.com",
+                description="Send an HTTP GET request to https://example.com",
+                api=APIEndpoint(
+                    service="HTTP",
+                    endpoint="https://example.com",
+                    method="GET",
+                    description="Generic HTTP GET health check",
+                    auth_type=AuthType.NONE,
+                    base_url="https://example.com",
+                ),
+                inputs={"url": "https://example.com"},
+            )
+        ],
+    )
+
+    code, extra_files = await generator.generate_workflow_code(dag, [])
+
+    assert extra_files == {}
+    assert "await client.get(url)" in code
+    assert '"latency_ms": latency_ms' in code
+    assert '"status_code": response.status_code' in code
+    assert "asyncio.run(main())" in code

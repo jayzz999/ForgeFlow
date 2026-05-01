@@ -30,6 +30,26 @@ async def test_groq_generate_json_uses_json_response_format(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_openai_generate_json_uses_configured_model(monkeypatch):
+    calls = []
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-4.1-mini")
+    monkeypatch.setattr(settings, "OPENAI_FAST_MODEL", "gpt-4.1-mini")
+
+    async def fake_openai_chat(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    monkeypatch.setattr(llm_client, "_openai_chat", fake_openai_chat)
+
+    result = await llm_client.generate_json("Return status", "You return JSON")
+
+    assert result == {"ok": True}
+    assert calls[0]["model"] == "gpt-4.1-mini"
+    assert calls[0]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
 async def test_groq_generate_text_returns_message_content(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
     monkeypatch.setattr(settings, "GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -81,6 +101,56 @@ async def test_groq_tool_loop_records_written_files(monkeypatch, tmp_path):
         return "Written 11 chars to src/workflow.py"
 
     monkeypatch.setattr(llm_client, "_groq_chat", fake_groq_chat)
+
+    code, extra_files = await llm_client.generate_with_tools(
+        prompt="p",
+        system="s",
+        tools_config=None,
+        tool_executor=fake_executor,
+        project_dir=str(tmp_path),
+    )
+
+    assert code == "Done"
+    assert extra_files == {"src/workflow.py": "print('ok')"}
+
+
+@pytest.mark.asyncio
+async def test_openai_tool_loop_records_written_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai")
+    responses = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "write_file",
+                                    "arguments": json.dumps(
+                                        {"path": "src/workflow.py", "content": "print('ok')"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        {"choices": [{"message": {"content": "Done", "tool_calls": []}}]},
+    ]
+
+    async def fake_openai_chat(messages, **kwargs):
+        return responses.pop(0)
+
+    async def fake_executor(tool_name, tool_args, project_dir):
+        assert tool_name == "write_file"
+        assert project_dir == str(tmp_path)
+        return "Written 11 chars to src/workflow.py"
+
+    monkeypatch.setattr(llm_client, "_openai_chat", fake_openai_chat)
 
     code, extra_files = await llm_client.generate_with_tools(
         prompt="p",

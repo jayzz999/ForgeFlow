@@ -7,6 +7,10 @@ load_dotenv()
 class Settings:
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").lower()
     LLM_FALLBACK_PROVIDER: str = os.getenv("LLM_FALLBACK_PROVIDER", "gemini").lower()
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    OPENAI_FAST_MODEL: str = os.getenv("OPENAI_FAST_MODEL", OPENAI_MODEL)
+
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     GROQ_FAST_MODEL: str = os.getenv("GROQ_FAST_MODEL", GROQ_MODEL)

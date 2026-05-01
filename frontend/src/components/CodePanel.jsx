@@ -212,11 +212,14 @@ export default function CodePanel({
     try {
       const res = await fetch(`/api/workflows/${workflowId}/run`, { method: 'POST' })
       const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.detail || data.message || `HTTP ${res.status}`)
+      }
       setLiveOutput({
         stdout: data.stdout || '',
         stderr: data.stderr || '',
         success: data.success,
-        execution_time: data.execution_time,
+        execution_time: data.execution_time || 0,
         source: 'live',
       })
     } catch (err) {

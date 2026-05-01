@@ -23,6 +23,7 @@ logger = logging.getLogger("forgeflow.llm")
 _client: genai.Client | None = None
 MAX_TOOL_ROUNDS = 15  # Safety limit for tool-calling loops
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
 
 def get_client() -> genai.Client:
@@ -35,8 +36,8 @@ def get_client() -> genai.Client:
 
 def _provider() -> str:
     provider = settings.LLM_PROVIDER.lower()
-    if provider == "gemini":
-        return "gemini"
+    if provider in {"gemini", "groq", "openai"}:
+        return provider
     return "groq"
 
 
@@ -49,17 +50,25 @@ def _model_for(provider: str, model: str | None, *, fast: bool = False) -> str:
         if model and not model.startswith("gemini"):
             model = None
         return model or (settings.GEMINI_FAST_MODEL if fast else settings.GEMINI_MODEL)
+    if provider == "openai":
+        if model and model.startswith("gemini"):
+            model = None
+        return model or (settings.OPENAI_FAST_MODEL if fast else settings.OPENAI_MODEL)
     if model and model.startswith("gemini"):
         model = None
     return model or (settings.GROQ_FAST_MODEL if fast else settings.GROQ_MODEL)
 
 
-def _should_fallback_from_groq(exc: Exception) -> bool:
+def _should_fallback_to_gemini(exc: Exception) -> bool:
     if settings.LLM_FALLBACK_PROVIDER != "gemini" or not settings.GEMINI_API_KEY:
         return False
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
     return exc.response.status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+def _should_fallback_from_groq(exc: Exception) -> bool:
+    return _should_fallback_to_gemini(exc)
 
 
 def _retry_delay(exc: httpx.HTTPStatusError, attempt: int) -> float:
@@ -124,6 +133,43 @@ async def _groq_chat(
     raise RuntimeError("Groq request failed without a response")
 
 
+async def _openai_chat(
+    messages: list[dict],
+    *,
+    model: str | None = None,
+    temperature: float = 0,
+    max_tokens: int = 8000,
+    response_format: dict | None = None,
+    tools: list[dict] | None = None,
+) -> dict:
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+
+    payload = {
+        "model": model or settings.OPENAI_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            OPENAI_CHAT_URL,
+            headers={
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 def _extract_json(text: str) -> dict:
     try:
         return json.loads(text)
@@ -143,6 +189,31 @@ async def generate_json(
     max_tokens: int = 2000,
 ) -> dict:
     """Call the configured LLM and return parsed JSON."""
+    if _provider() == "openai":
+        try:
+            response = await _openai_chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt + "\n\nReturn only valid JSON."},
+                ],
+                model=_model_for("openai", model, fast=True),
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            if _should_fallback_to_gemini(exc):
+                logger.warning("OpenAI JSON generation failed; falling back to Gemini")
+                return await _generate_json_gemini(prompt, system, model, temperature, max_tokens)
+            raise
+        text = response["choices"][0]["message"].get("content") or "{}"
+        try:
+            return _extract_json(text)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse OpenAI JSON response: {e}")
+            logger.debug(f"Raw response: {text[:500]}")
+            return {}
+
     if _provider() == "groq":
         try:
             response = await _groq_chat(
@@ -206,6 +277,24 @@ async def generate_text(
     max_tokens: int = 8000,
 ) -> str:
     """Call the configured LLM and return plain text."""
+    if _provider() == "openai":
+        try:
+            response = await _openai_chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                model=_model_for("openai", model),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            if _should_fallback_to_gemini(exc):
+                logger.warning("OpenAI text generation failed; falling back to Gemini")
+                return await _generate_text_gemini(prompt, system, model, temperature, max_tokens)
+            raise
+        return response["choices"][0]["message"].get("content") or ""
+
     if _provider() == "groq":
         try:
             response = await _groq_chat(
@@ -279,9 +368,10 @@ async def generate_with_tools(
         (final_text, extra_files) where extra_files is a dict of
         {relative_path: content} for any files written via write_file tool.
     """
-    if _provider() == "groq":
+    if _provider() in {"groq", "openai"}:
+        provider = _provider()
         try:
-            return await _generate_with_tools_groq(
+            return await _generate_with_tools_openai_compatible(
                 prompt=prompt,
                 system=system,
                 tool_executor=tool_executor,
@@ -290,10 +380,11 @@ async def generate_with_tools(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_tool_call=on_tool_call,
+                provider=provider,
             )
         except Exception as exc:
-            if _should_fallback_from_groq(exc) and tools_config is not None:
-                logger.warning("Groq tool generation failed; falling back to Gemini")
+            if _should_fallback_to_gemini(exc) and tools_config is not None:
+                logger.warning("%s tool generation failed; falling back to Gemini", provider.title())
             else:
                 raise
 
@@ -475,7 +566,7 @@ def _groq_tool_schema() -> list[dict]:
     ]
 
 
-async def _generate_with_tools_groq(
+async def _generate_with_tools_openai_compatible(
     *,
     prompt: str,
     system: str,
@@ -485,6 +576,7 @@ async def _generate_with_tools_groq(
     temperature: float,
     max_tokens: int,
     on_tool_call: Callable | None,
+    provider: str,
 ) -> tuple[str, dict[str, str]]:
     extra_files: dict[str, str] = {}
     messages: list[dict] = [
@@ -494,10 +586,11 @@ async def _generate_with_tools_groq(
     response: dict | None = None
 
     for round_num in range(MAX_TOOL_ROUNDS):
-        logger.info(f"[Agent] Groq round {round_num + 1}/{MAX_TOOL_ROUNDS}")
-        response = await _groq_chat(
+        logger.info(f"[Agent] {provider.title()} round {round_num + 1}/{MAX_TOOL_ROUNDS}")
+        chat = _openai_chat if provider == "openai" else _groq_chat
+        response = await chat(
             messages,
-            model=_model_for("groq", model),
+            model=_model_for(provider, model),
             temperature=temperature,
             max_tokens=max_tokens,
             tools=_groq_tool_schema(),
@@ -543,7 +636,7 @@ async def _generate_with_tools_groq(
                 "content": result[:6000],
             })
 
-    logger.warning(f"[Agent] Hit max {MAX_TOOL_ROUNDS} Groq tool rounds")
+    logger.warning(f"[Agent] Hit max {MAX_TOOL_ROUNDS} {provider.title()} tool rounds")
     if response:
         return response["choices"][0]["message"].get("content") or "", extra_files
     return "", extra_files

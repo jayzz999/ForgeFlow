@@ -1,11 +1,41 @@
 """Build workflow DAG from requirements and discovered APIs."""
 
 import json
+import re
 import uuid
 
 from backend.shared.config import settings
 from backend.shared.llm_client import generate_json
-from backend.shared.models import WorkflowDAG, WorkflowStep, APIEndpoint
+from backend.shared.models import AuthType, WorkflowDAG, WorkflowStep, APIEndpoint
+
+
+_URL_RE = re.compile(r"https?://[^\s),;\]\"']+")
+
+
+def _http_api_for_action(action: dict) -> APIEndpoint | None:
+    """Create a generic HTTP endpoint for deterministic HTTP-only workflows."""
+    service_hint = str(action.get("service_hint", "")).lower()
+    api_type = str(action.get("api_type", "")).lower()
+    description = action.get("description", "")
+    inputs = action.get("inputs", {}) if isinstance(action.get("inputs", {}), dict) else {}
+    url = inputs.get("url")
+    if not url:
+        match = _URL_RE.search(description)
+        url = match.group(0).rstrip(".") if match else ""
+
+    if not url or ("http" not in service_hint and api_type != "http_check"):
+        return None
+
+    return APIEndpoint(
+        service="HTTP",
+        endpoint=url,
+        method="GET",
+        description="Generic HTTP GET health check",
+        parameters=[{"name": "url", "type": "string", "required": True, "default": url}],
+        auth_type=AuthType.NONE,
+        base_url=url,
+        confidence=0.9,
+    )
 
 
 async def build_dag(
@@ -130,13 +160,18 @@ def _build_fallback_dag(requirements: dict, apis: list[APIEndpoint]) -> Workflow
     """Build a simple sequential DAG as fallback."""
     steps = []
     for i, action in enumerate(requirements.get("actions", [])):
-        api = apis[i] if i < len(apis) else None
+        api = apis[i] if i < len(apis) else _http_api_for_action(action)
         depends = [f"step_{i}"] if i > 0 else []
+        inputs = action.get("inputs", {}) if isinstance(action.get("inputs", {}), dict) else {}
+        if api and api.service == "HTTP" and "url" not in inputs:
+            inputs = {**inputs, "url": api.base_url or api.endpoint}
         steps.append(WorkflowStep(
             id=f"step_{i+1}",
             name=action.get("description", f"Step {i+1}")[:50],
             description=action.get("description", ""),
             api=api,
+            inputs=inputs,
+            outputs={"status_code": "HTTP status code", "latency_ms": "Request latency in milliseconds", "healthy": "Boolean health result"} if api and api.service == "HTTP" else {},
             depends_on=depends,
             step_type="trigger" if action.get("is_trigger") else "api_call",
         ))

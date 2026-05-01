@@ -1,10 +1,70 @@
 """Conversation engine with smart requirement extraction and clarification."""
 
 import json
+import re
 
 from backend.shared.config import settings
 from backend.shared.llm_client import generate_json, generate_text
 from backend.shared.services import SUPPORTED_SERVICE_LABEL
+
+
+_URL_RE = re.compile(r"https?://[^\s),;\]\"']+")
+
+
+def _extract_http_only_requirements(user_request: str) -> dict | None:
+    """Deterministic fallback for fully specified one-step HTTP prompts."""
+    text = user_request.strip()
+    lower = text.lower()
+    url_match = _URL_RE.search(text)
+    if not url_match:
+        return None
+
+    positive_http_signal = any(
+        term in lower
+        for term in ("http", "get ", "request", "health", "status", "latency", "url", "endpoint")
+    )
+    if not positive_http_signal:
+        return None
+
+    # Avoid turning multi-service requests into an HTTP-only workflow.
+    disallowed_services = ("slack", "gmail", "google sheets", "sheet", "email", "webhook", "alert")
+    if any(service in lower for service in disallowed_services) and "do not use" not in lower:
+        return None
+
+    url = url_match.group(0).rstrip(".")
+    return {
+        "intent": "monitoring",
+        "workflow_name": "HTTP Health Check",
+        "description": f"Send an HTTP GET request to {url}, measure latency, and print a JSON health summary.",
+        "entities": [
+            {"name": "HTTP", "type": "protocol"},
+            {"name": url, "type": "url"},
+        ],
+        "actions": [
+            {
+                "id": "step_1",
+                "description": (
+                    f"Send an HTTP GET request to {url}, measure latency_ms, "
+                    "and print JSON with status_code and healthy"
+                ),
+                "service_hint": "HTTP",
+                "api_type": "http_check",
+                "depends_on": [],
+                "is_trigger": False,
+                "research_urls": [],
+                "inputs": {"url": url},
+            }
+        ],
+        "triggers": [{"type": "manual", "description": "Manual run"}],
+        "conditions": [],
+        "data_flows": [],
+        "confidence": 0.92,
+        "clarification_needed": [],
+        "assumed_defaults": [
+            "Manual trigger",
+            "Healthy means HTTP status code is between 200 and 399",
+        ],
+    }
 
 
 async def extract_requirements(user_request: str, messages: list[dict] | None = None) -> dict:
@@ -135,6 +195,10 @@ OUTPUT ONLY valid JSON:
             return result
     except Exception as e:
         print(f"[Conversation] Requirement extraction error: {e}")
+
+    deterministic = _extract_http_only_requirements(user_request)
+    if deterministic:
+        return deterministic
 
     return {
         "intent": "custom",

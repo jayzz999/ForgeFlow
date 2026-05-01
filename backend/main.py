@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 import zipfile
@@ -199,10 +200,15 @@ async def health():
 async def provider_status():
     """Return safe runtime configuration details for the UI and deploy checks."""
     provider = settings.LLM_PROVIDER.lower()
-    if provider not in {"groq", "gemini"}:
+    if provider not in {"openai", "groq", "gemini"}:
         provider = "groq"
 
     llm_providers = {
+        "openai": {
+            "configured": bool(settings.OPENAI_API_KEY),
+            "model": settings.OPENAI_MODEL,
+            "fast_model": settings.OPENAI_FAST_MODEL,
+        },
         "groq": {
             "configured": bool(settings.GROQ_API_KEY),
             "model": settings.GROQ_MODEL,
@@ -419,7 +425,7 @@ async def run_workflow(workflow_id: str, _admin: bool = Depends(require_admin_to
             # Step 1: Install dependencies in the isolated run directory.
             if os.path.exists(req_file):
                 pip = await _asyncio.create_subprocess_exec(
-                    "pip", "install", "-q", "-r", req_file,
+                    sys.executable, "-m", "pip", "install", "-q", "-r", req_file,
                     stdout=_asyncio.subprocess.PIPE,
                     stderr=_asyncio.subprocess.PIPE,
                     cwd=run_dir,
@@ -440,7 +446,7 @@ async def run_workflow(workflow_id: str, _admin: bool = Depends(require_admin_to
 
             # Step 2: Run the workflow with only allowlisted service env vars.
             proc = await _asyncio.create_subprocess_exec(
-                "python", "workflow.py",
+                sys.executable, "workflow.py",
                 stdout=_asyncio.subprocess.PIPE,
                 stderr=_asyncio.subprocess.PIPE,
                 cwd=run_dir,
