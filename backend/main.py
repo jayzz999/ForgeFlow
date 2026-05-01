@@ -71,6 +71,7 @@ RUN_ENV_EXACT = {"TARGET_URL"}
 MAX_RUN_OUTPUT_CHARS = 12000
 PLATFORM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "forgeflow_platform.db")
 APP_BUILDS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app_builds")
+API_GURU_LIST_URL = "https://api.apis.guru/v2/list.json"
 
 CAPABILITY_REGISTRY = BASE_CAPABILITIES
 
@@ -1392,6 +1393,44 @@ def _all_capabilities() -> list[dict]:
     return capabilities_data
 
 
+def _tokenize_for_match(text: str) -> set[str]:
+    return {
+        token
+        for token in "".join(ch.lower() if ch.isalnum() else " " for ch in text).split()
+        if len(token) > 2 and token not in {"the", "and", "for", "with", "from", "into", "this", "that", "api"}
+    }
+
+
+def _capability_search(prompt: str, limit: int = 8) -> list[dict]:
+    query_tokens = _tokenize_for_match(prompt)
+    matches = []
+    for capability in _all_capabilities():
+        haystack = " ".join([
+            capability.get("id", ""),
+            capability.get("label", ""),
+            capability.get("category", ""),
+            capability.get("description", ""),
+            capability.get("source", ""),
+            capability.get("path", ""),
+        ])
+        tokens = _tokenize_for_match(haystack)
+        overlap = query_tokens & tokens
+        if not overlap:
+            continue
+        score = min(0.98, 0.35 + (len(overlap) / max(len(query_tokens), 1)))
+        matches.append({
+            "id": capability["id"],
+            "label": capability.get("label", capability["id"]),
+            "source": capability.get("source", "catalog"),
+            "risk": capability.get("risk", "tool_call"),
+            "description": capability.get("description", ""),
+            "score": round(score, 3),
+            "matched_terms": sorted(overlap),
+            "capability": capability,
+        })
+    return sorted(matches, key=lambda item: item["score"], reverse=True)[:limit]
+
+
 def _connector_adapters() -> list[dict]:
     connectors = {item["service"]: item for item in _list_connector_states()}
     capability_by_id = {item["id"]: item for item in _all_capabilities()}
@@ -1531,7 +1570,7 @@ async def _compile_automation_spec(prompt: str, context: dict | None = None) -> 
         })
 
     for detected in preflight["detected_services"]:
-        capability_id = _capability_for_service(detected["service"])
+        capability_id = detected.get("capability_id") or _capability_for_service(detected["service"])
         adapter = adapters_by_id.get(capability_id, {})
         if not any(item["id"] == capability_id for item in connectors):
             connectors.append({
@@ -3035,6 +3074,11 @@ def _list_app_builds() -> list[dict]:
 
 def _extract_openapi_capabilities(spec: dict) -> list[dict]:
     title = spec.get("info", {}).get("title", "OpenAPI")
+    server_url = ""
+    if isinstance(spec.get("servers"), list) and spec["servers"]:
+        server_url = spec["servers"][0].get("url", "")
+    security_schemes = spec.get("components", {}).get("securitySchemes", {}) if isinstance(spec.get("components"), dict) else {}
+    auth_requirements = sorted(security_schemes.keys())
     capabilities_data = []
     for path, path_item in (spec.get("paths") or {}).items():
         if not isinstance(path_item, dict):
@@ -3049,14 +3093,100 @@ def _extract_openapi_capabilities(spec: dict) -> list[dict]:
                 "label": operation.get("summary") or operation_id.replace("_", " ").title(),
                 "category": title,
                 "risk": "network_call" if method.lower() == "get" else "external_write",
-                "requires_auth": [],
+                "requires_auth": auth_requirements,
                 "description": f"{method.upper()} {path}",
                 "dry_run": True,
                 "source": "openapi",
                 "method": method.upper(),
                 "path": path,
+                "server_url": server_url,
+                "operation_id": operation_id,
             })
     return capabilities_data
+
+
+def _fetch_json_url(url: str) -> dict:
+    if not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Only public https:// URLs are supported")
+    req = Request(url, headers={"User-Agent": "ForgeFlow API Discovery/1.0"})
+    try:
+        with urlopen(req, timeout=20) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not fetch URL: {exc}")
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        try:
+            import yaml
+            return yaml.safe_load(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"URL did not return JSON/YAML: {exc}")
+
+
+def _api_guru_candidates_from_catalog(prompt: str, catalog: dict, limit: int = 8) -> list[dict]:
+    query_tokens = _tokenize_for_match(prompt)
+    candidates = []
+    for api_id, item in catalog.items():
+        versions = item.get("versions") or {}
+        preferred = item.get("preferred")
+        version = versions.get(preferred) or next(iter(versions.values()), {})
+        info = version.get("info", {})
+        haystack = " ".join([
+            api_id,
+            info.get("title", ""),
+            info.get("description", ""),
+            " ".join(info.get("x-tags", []) if isinstance(info.get("x-tags"), list) else []),
+        ])
+        tokens = _tokenize_for_match(haystack)
+        overlap = query_tokens & tokens
+        if not overlap:
+            continue
+        swagger_url = version.get("swaggerUrl") or version.get("swaggerYamlUrl")
+        if not swagger_url:
+            continue
+        score = min(0.99, 0.3 + (len(overlap) / max(len(query_tokens), 1)))
+        candidates.append({
+            "id": api_id,
+            "title": info.get("title", api_id),
+            "description": info.get("description", "")[:500],
+            "version": version.get("version") or preferred,
+            "source": "apis_guru",
+            "source_url": swagger_url,
+            "docs_url": item.get("url") or info.get("termsOfService"),
+            "score": round(score, 3),
+            "matched_terms": sorted(overlap),
+        })
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)[:limit]
+
+
+def _search_public_api_directory(prompt: str, limit: int = 8) -> list[dict]:
+    catalog = _fetch_json_url(API_GURU_LIST_URL)
+    return _api_guru_candidates_from_catalog(prompt, catalog, limit=limit)
+
+
+def _discover_capabilities(prompt: str, limit: int = 8, include_public: bool = True) -> dict:
+    local = _capability_search(prompt, limit=limit)
+    public = []
+    public_error = None
+    if include_public:
+        try:
+            public = _search_public_api_directory(prompt, limit=limit)
+        except HTTPException as exc:
+            public_error = exc.detail
+        except Exception as exc:
+            public_error = str(exc)
+    return {
+        "prompt": prompt,
+        "local_capabilities": local,
+        "public_apis": public,
+        "public_error": public_error,
+        "mcp_status": {
+            "runtime_connected": False,
+            "mode": "manifest_ingestion",
+            "detail": "ForgeFlow can ingest MCP manifests as capabilities; live MCP tool execution is still a runtime adapter task.",
+        },
+    }
 
 
 def _extract_mcp_capabilities(manifest: dict) -> list[dict]:
@@ -4448,6 +4578,13 @@ async def ingest_openapi(body: dict):
     return _store_ingestion("openapi", name, summary, capabilities_data)
 
 
+async def _ingest_openapi_from_url(url: str) -> dict:
+    body = _fetch_json_url(url)
+    ingestion = await ingest_openapi(body)
+    ingestion["source_url"] = url
+    return ingestion
+
+
 @app.post("/api/openapi/upload")
 async def upload_openapi(file: UploadFile = File(...)):
     content = (await file.read()).decode("utf-8", errors="replace")
@@ -4460,6 +4597,12 @@ async def upload_openapi(file: UploadFile = File(...)):
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Upload JSON or YAML OpenAPI content: {exc}")
     return await ingest_openapi(body)
+
+
+@app.post("/api/openapi/import-url")
+async def import_openapi_url(body: dict):
+    """Fetch a public OpenAPI JSON/YAML URL and ingest its endpoints as capabilities."""
+    return await _ingest_openapi_from_url(str(body.get("url", "")).strip())
 
 
 @app.post("/api/mcp/ingest")
@@ -4482,6 +4625,25 @@ async def discover_mcp_adapter(body: dict):
     manifest = body.get("manifest") or body
     ingestion = await ingest_mcp(manifest)
     return {"server_url": server_url, "ingestion": ingestion, "dynamic_capabilities": ingestion["capabilities"]}
+
+
+@app.post("/api/discovery/search")
+async def discovery_search(body: dict):
+    """Search imported capabilities and public OpenAPI directories for a prompt."""
+    prompt = str(body.get("prompt", "")).strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    return _discover_capabilities(prompt, include_public=bool(body.get("include_public", True)))
+
+
+@app.post("/api/discovery/import")
+async def discovery_import(body: dict):
+    """Import a selected public OpenAPI candidate discovered by /api/discovery/search."""
+    source_url = str(body.get("source_url", "")).strip()
+    if not source_url:
+        raise HTTPException(status_code=400, detail="source_url is required")
+    ingestion = await _ingest_openapi_from_url(source_url)
+    return {"ingestion": ingestion, "capabilities": ingestion["capabilities"]}
 
 
 @app.get("/api/connectors/oauth/{service}/start")
@@ -4661,6 +4823,7 @@ async def preflight_prompt(body: dict):
     }
 
     status = await provider_status()
+    capability_matches = _capability_search(prompt, limit=6)
     detected = []
     missing_credentials = []
     for service, markers in service_markers.items():
@@ -4676,6 +4839,21 @@ async def preflight_prompt(body: dict):
                 detected.append(item)
                 if not service_status["configured"]:
                     missing_credentials.append(item)
+    dynamic_detected = []
+    for match in capability_matches:
+        capability = match["capability"]
+        source = capability.get("source", "")
+        if source in {"openapi", "mcp"} and match["score"] >= 0.45:
+            dynamic_detected.append({
+                "service": source,
+                "name": capability.get("category") or capability.get("label"),
+                "configured": not capability.get("requires_auth"),
+                "required_env": capability.get("requires_auth", []),
+                "capability_id": capability["id"],
+                "source": source,
+                "score": match["score"],
+            })
+    detected.extend(dynamic_detected)
 
     schema_needed = any(marker in prompt_lower for marker in ("sheet", "spreadsheet", "excel", "csv", "database", "table", "hr", "crm", "airtable", "notion"))
     external_write = any(marker in prompt_lower for marker in ("send", "post", "append", "write", "create", "update", "delete", "invite"))
@@ -4705,6 +4883,8 @@ async def preflight_prompt(body: dict):
         "dry_run": dry_run,
         "risks": risks,
         "questions": questions,
+        "capability_matches": capability_matches,
+        "dynamic_capabilities": dynamic_detected,
         "recommendation": "Collect missing schemas/credentials before code generation." if questions else "Ready to generate a verified automation plan.",
     }
 

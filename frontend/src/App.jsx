@@ -1620,10 +1620,49 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
 }
 
 function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh }) {
+  const [searchPrompt, setSearchPrompt] = useState('Find an API to create customer support tickets and update CRM contacts.')
+  const [discovery, setDiscovery] = useState(null)
   const [openApiText, setOpenApiText] = useState('{\n  "openapi": "3.0.0",\n  "info": { "title": "HR Platform", "version": "1.0" },\n  "paths": {\n    "/candidates": { "get": { "operationId": "listCandidates", "summary": "List candidates" } },\n    "/employees": { "post": { "operationId": "createEmployee", "summary": "Create employee" } }\n  }\n}')
   const [mcpText, setMcpText] = useState('{\n  "name": "hr-records-mcp",\n  "tools": [\n    { "name": "lookup_employee", "description": "Find an employee by email", "input_schema": { "email": "string" } },\n    { "name": "create_onboarding_task", "description": "Create an onboarding task", "input_schema": { "employee_id": "string" } }\n  ]\n}')
   const [message, setMessage] = useState(null)
   const [error, setError] = useState(null)
+
+  const searchApis = async () => {
+    setMessage(null)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/discovery/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: searchPrompt, include_public: true }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setDiscovery(payload)
+      setMessage(`Found ${payload.local_capabilities.length} local matches and ${payload.public_apis.length} public OpenAPI candidates`)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const importCandidate = async (candidate) => {
+    setMessage(null)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/discovery/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_url: candidate.source_url }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setMessage(`${payload.ingestion.name} imported ${payload.capabilities.length} capabilities from ${candidate.title}`)
+      onCapabilitiesRefresh()
+      onIngestionsRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
 
   const ingest = async (kind) => {
     setMessage(null)
@@ -1651,6 +1690,49 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
         title="Teach ForgeFlow tools before the user writes prompts"
         description="Import OpenAPI specs and MCP tool manifests so planning uses real operations, input schemas, and risk labels instead of hallucinated connectors."
       />
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="text-sm font-semibold">Real API discovery</h3>
+        <p className="mt-2 text-sm leading-6 text-forge-muted">Search imported capabilities and the public APIs.guru OpenAPI directory, then import a selected spec into ForgeFlow.</p>
+        <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto]">
+          <input value={searchPrompt} onChange={(event) => setSearchPrompt(event.target.value)} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" />
+          <button onClick={searchApis} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+            <Search size={16} /> Search APIs
+          </button>
+        </div>
+        {discovery && (
+          <div className="mt-5 grid gap-4 xl:grid-cols-2">
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Local capability matches</h4>
+              <div className="mt-3 space-y-2">
+                {discovery.local_capabilities.length === 0 ? <EmptyState title="No local matches" body="Import an OpenAPI spec or MCP manifest to expand local planning." /> : discovery.local_capabilities.map((item) => (
+                  <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{item.label}</div>
+                      <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-300">{Math.round(item.score * 100)}%</span>
+                    </div>
+                    <p className="mt-2 text-xs text-forge-muted">{item.description}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Public OpenAPI candidates</h4>
+              <div className="mt-3 space-y-2">
+                {discovery.public_apis.length === 0 ? <EmptyState title="No public candidates" body={discovery.public_error || 'Try a system or provider name such as Stripe, GitHub, Twilio, Zendesk, or HubSpot.'} /> : discovery.public_apis.map((item) => (
+                  <div key={item.source_url} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{item.title}</div>
+                      <span className="rounded-full bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{Math.round(item.score * 100)}%</span>
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-xs text-forge-muted">{item.description}</p>
+                    <button onClick={() => importCandidate(item)} className="mt-3 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Import OpenAPI spec</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="grid gap-4 xl:grid-cols-2">
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
           <h3 className="text-sm font-semibold">OpenAPI upload/import</h3>

@@ -601,6 +601,65 @@ def test_mcp_ingestion_extracts_tools():
     ]
 
 
+def test_public_api_directory_search_ranks_openapi_candidates():
+    from backend import main
+
+    catalog = {
+        "example.com": {
+            "preferred": "v1",
+            "versions": {
+                "v1": {
+                    "swaggerUrl": "https://example.com/openapi.json",
+                    "info": {"title": "Ticket Desk", "description": "Create customer support tickets and update ticket status"},
+                }
+            },
+        },
+        "payments.com": {
+            "preferred": "v1",
+            "versions": {
+                "v1": {
+                    "swaggerUrl": "https://payments.example/openapi.json",
+                    "info": {"title": "Payments", "description": "Create charges and refunds"},
+                }
+            },
+        },
+    }
+
+    results = main._api_guru_candidates_from_catalog("create support ticket for customer", catalog)
+
+    assert results[0]["title"] == "Ticket Desk"
+    assert results[0]["source_url"] == "https://example.com/openapi.json"
+    assert "ticket" in results[0]["matched_terms"]
+
+
+@pytest.mark.asyncio
+async def test_preflight_uses_imported_openapi_capabilities(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    main._store_ingestion(
+        "openapi",
+        "Ticket Desk",
+        {"title": "Ticket Desk"},
+        [{
+            "id": "openapi.createTicket",
+            "label": "Create Support Ticket",
+            "category": "Ticket Desk",
+            "risk": "external_write",
+            "requires_auth": [],
+            "description": "POST /tickets",
+            "source": "openapi",
+            "method": "POST",
+            "path": "/tickets",
+        }],
+    )
+
+    result = await main.preflight_prompt({"prompt": "create a support ticket for a customer issue"})
+
+    assert any(item["capability_id"] == "openapi.createTicket" for item in result["dynamic_capabilities"])
+    assert any(item["id"] == "openapi.createTicket" for item in result["capability_matches"])
+
+
 @pytest.mark.asyncio
 async def test_persistent_approval_queue_roundtrip(monkeypatch, tmp_path):
     from backend import main
