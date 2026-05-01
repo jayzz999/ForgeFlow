@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import csv
+import hmac
 import hashlib
 import json
 import logging
@@ -278,6 +280,50 @@ def _platform_db() -> sqlite3.Connection:
             run_id TEXT,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS credential_vault (
+            id TEXT PRIMARY KEY,
+            service TEXT NOT NULL,
+            label TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            ciphertext TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS run_queue (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 5,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            last_error TEXT,
+            run_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS deployment_activations (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL,
+            artifacts_json TEXT NOT NULL,
+            blockers_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id TEXT PRIMARY KEY,
+            suite TEXT NOT NULL,
+            score REAL NOT NULL,
+            cases_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -300,6 +346,53 @@ def _json_loads(value: str | None, fallback):
         return json.loads(value)
     except Exception:
         return fallback
+
+
+def _vault_key() -> bytes:
+    seed = (
+        os.getenv("FORGEFLOW_VAULT_KEY")
+        or settings.FORGEFLOW_ADMIN_TOKEN
+        or "forgeflow-local-development-vault-key"
+    ).encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", seed, b"forgeflow-vault-v1", 200_000, dklen=32)
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    blocks = []
+    counter = 0
+    while sum(len(block) for block in blocks) < length:
+        blocks.append(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
+        counter += 1
+    return b"".join(blocks)[:length]
+
+
+def _encrypt_secret(value: str) -> str:
+    key = _vault_key()
+    nonce = os.urandom(16)
+    plain = value.encode("utf-8")
+    stream = _keystream(key, nonce, len(plain))
+    cipher = bytes(a ^ b for a, b in zip(plain, stream))
+    mac = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(nonce + mac + cipher).decode("ascii")
+
+
+def _decrypt_secret(token: str) -> str:
+    raw = base64.urlsafe_b64decode(token.encode("ascii"))
+    nonce, mac, cipher = raw[:16], raw[16:48], raw[48:]
+    key = _vault_key()
+    expected = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected):
+        raise ValueError("Credential vault integrity check failed")
+    stream = _keystream(key, nonce, len(cipher))
+    return bytes(a ^ b for a, b in zip(cipher, stream)).decode("utf-8")
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:3]}...{value[-3:]}"
 
 
 def _oauth_specs() -> dict[str, dict]:
@@ -427,6 +520,67 @@ def _list_oauth_sessions() -> list[dict]:
         }
         for row in rows
     ]
+
+
+def _store_credential(service: str, label: str, kind: str, secret_value: str, metadata: dict | None = None) -> dict:
+    credential_id = _stable_id("cred", {"service": service, "label": label, "kind": kind})
+    now = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO credential_vault
+        (id, service, label, kind, ciphertext, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            credential_id,
+            service,
+            label,
+            kind,
+            _encrypt_secret(secret_value),
+            json.dumps(metadata or {}),
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": credential_id,
+        "service": service,
+        "label": label,
+        "kind": kind,
+        "masked": _mask_secret(secret_value),
+        "metadata": metadata or {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _list_credentials() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM credential_vault ORDER BY created_at DESC").fetchall()
+    conn.close()
+    credentials = []
+    for row in rows:
+        try:
+            masked = _mask_secret(_decrypt_secret(row["ciphertext"]))
+            valid = True
+        except Exception:
+            masked = "unreadable"
+            valid = False
+        credentials.append({
+            "id": row["id"],
+            "service": row["service"],
+            "label": row["label"],
+            "kind": row["kind"],
+            "masked": masked,
+            "valid": valid,
+            "metadata": _json_loads(row["metadata_json"], {}),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+    return credentials
 
 
 def _trim_output(value: str) -> str:
@@ -758,6 +912,82 @@ def _list_trigger_events(limit: int = 30) -> list[dict]:
     ]
 
 
+def _enqueue_run(workflow_id: str, payload: dict | None = None, priority: int = 5, max_attempts: int = 3) -> dict:
+    queue_id = _stable_id("queue", {"workflow_id": workflow_id, "priority": priority})
+    now = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO run_queue
+        (id, workflow_id, status, payload_json, priority, attempts, max_attempts, created_at, updated_at)
+        VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?)
+        """,
+        (queue_id, workflow_id, json.dumps(payload or {}), priority, max_attempts, now, now),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": queue_id,
+        "workflow_id": workflow_id,
+        "status": "queued",
+        "payload": payload or {},
+        "priority": priority,
+        "attempts": 0,
+        "max_attempts": max_attempts,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _list_run_queue() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM run_queue ORDER BY status ASC, priority ASC, created_at ASC LIMIT 50").fetchall()
+    conn.close()
+    return [
+        {
+            **dict(row),
+            "payload": _json_loads(row["payload_json"], {}),
+        }
+        for row in rows
+    ]
+
+
+async def _process_queue_item(queue_id: str) -> dict:
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM run_queue WHERE id = ?", (queue_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    if row["status"] not in {"queued", "failed"}:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Queue item is {row['status']}")
+    attempts = int(row["attempts"] or 0) + 1
+    now = _now_iso()
+    conn.execute("UPDATE run_queue SET status = 'running', attempts = ?, updated_at = ? WHERE id = ?", (attempts, now, queue_id))
+    conn.commit()
+    conn.close()
+    try:
+        result = await _execute_workflow_project(row["workflow_id"])
+    except HTTPException as exc:
+        result = {"success": False, "stdout": "", "stderr": exc.detail, "execution_time": 0.0, "return_code": -1}
+    except Exception as exc:
+        result = {"success": False, "stdout": "", "stderr": str(exc), "execution_time": 0.0, "return_code": -1}
+    run_meta = _record_run_log(row["workflow_id"], result, attempt=attempts)
+    final_status = "succeeded" if result.get("success") else ("failed" if attempts >= int(row["max_attempts"] or 3) else "queued")
+    conn = _platform_db()
+    conn.execute(
+        """
+        UPDATE run_queue
+        SET status = ?, last_error = ?, run_id = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (final_status, None if result.get("success") else result.get("stderr", "failed"), run_meta["run_id"], _now_iso(), queue_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"queue_id": queue_id, "queue_status": final_status, "run": {**result, **run_meta}}
+
+
 def _all_capabilities() -> list[dict]:
     conn = _platform_db()
     rows = conn.execute("SELECT capabilities_json FROM ingestions ORDER BY created_at DESC").fetchall()
@@ -948,6 +1178,139 @@ def _list_deployment_plans() -> list[dict]:
     ]
 
 
+def _record_deployment_activation(plan_id: str, plan: dict, status: str) -> dict:
+    activation_id = _stable_id("activation", {"plan_id": plan_id, "status": status})
+    readiness = plan.get("readiness", {})
+    activation = {
+        "id": activation_id,
+        "plan_id": plan_id,
+        "workflow_id": plan.get("workflow_id"),
+        "target": plan.get("target"),
+        "status": status,
+        "artifacts": plan.get("artifacts", {}),
+        "blockers": readiness.get("blocking", []),
+        "created_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO deployment_activations
+        (id, plan_id, workflow_id, target, status, artifacts_json, blockers_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            activation["id"],
+            activation["plan_id"],
+            activation["workflow_id"],
+            activation["target"],
+            activation["status"],
+            json.dumps(activation["artifacts"]),
+            json.dumps(activation["blockers"]),
+            activation["created_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return activation
+
+
+def _list_deployment_activations() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM deployment_activations ORDER BY created_at DESC LIMIT 30").fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "plan_id": row["plan_id"],
+            "workflow_id": row["workflow_id"],
+            "target": row["target"],
+            "status": row["status"],
+            "artifacts": _json_loads(row["artifacts_json"], {}),
+            "blockers": _json_loads(row["blockers_json"], []),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+EVAL_SUITES = {
+    "core": [
+        {
+            "id": "hr_grounding",
+            "prompt": "Automate HR onboarding from an Excel sheet, draft Gmail and Slack messages, and append a tracking row.",
+            "must_detect": ["gmail", "slack", "sheets"],
+            "schema_needed": True,
+            "risk": "external_write_requires_approval",
+        },
+        {
+            "id": "incident_webhook",
+            "prompt": "Expose a webhook that checks an HTTP health endpoint and posts to Slack if it fails.",
+            "must_detect": ["http", "slack"],
+            "schema_needed": False,
+            "risk": "external_write_requires_approval",
+        },
+        {
+            "id": "csv_enrichment",
+            "prompt": "Read a CSV of leads, call a CRM API, and prepare updates for approval without writing directly.",
+            "must_detect": ["http"],
+            "schema_needed": True,
+            "risk": "external_write_requires_approval",
+        },
+    ]
+}
+
+
+async def _run_eval_suite(suite: str = "core") -> dict:
+    cases = EVAL_SUITES.get(suite)
+    if not cases:
+        raise HTTPException(status_code=404, detail="Eval suite not found")
+    results = []
+    for case in cases:
+        preflight = await preflight_prompt({"prompt": case["prompt"]})
+        detected = {item["service"] for item in preflight["detected_services"]}
+        detected_ok = all(service in detected for service in case["must_detect"])
+        schema_ok = preflight["schema_needed"] == case["schema_needed"]
+        risk_ok = case["risk"] in preflight["risks"]
+        score = sum([detected_ok, schema_ok, risk_ok]) / 3
+        results.append({
+            **case,
+            "detected": sorted(detected),
+            "risks": preflight["risks"],
+            "score": round(score, 2),
+            "passed": score == 1,
+        })
+    total = round(sum(item["score"] for item in results) / len(results), 2)
+    eval_id = _stable_id("eval", {"suite": suite, "score": total})
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO eval_runs
+        (id, suite, score, cases_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (eval_id, suite, total, json.dumps(results), _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": eval_id, "suite": suite, "score": total, "cases": results}
+
+
+def _list_eval_runs() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM eval_runs ORDER BY created_at DESC LIMIT 20").fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "suite": row["suite"],
+            "score": row["score"],
+            "cases": _json_loads(row["cases_json"], []),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
 def _product_gap_analysis() -> dict:
     connectors = _list_connector_states()
     pending_approvals = [item for item in _list_approvals() if item["status"] == "pending"]
@@ -987,6 +1350,18 @@ def _product_gap_analysis() -> dict:
             "label": "Run reliability",
             "status": "pass" if runs and not failed_runs else "warn",
             "detail": f"{len(runs)} logged runs, {len(failed_runs)} failed or needs-review runs",
+        },
+        {
+            "id": "credential_vault",
+            "label": "Credential vault",
+            "status": "pass" if _list_credentials() else "warn",
+            "detail": f"{len(_list_credentials())} encrypted credentials stored",
+        },
+        {
+            "id": "prompt_evals",
+            "label": "Prompt evals",
+            "status": "pass" if _list_eval_runs() else "warn",
+            "detail": f"{len(_list_eval_runs())} eval runs recorded",
         },
     ]
     blockers = [item for item in checks if item["status"] != "pass"]
@@ -1306,7 +1681,7 @@ async def templates():
 @app.get("/api/runs")
 async def run_history():
     """Return recent local workflow execution artifacts."""
-    return {"runs": _collect_run_history(limit=30)}
+    return {"runs": _collect_run_history(limit=30), "queue": _list_run_queue()}
 
 
 @app.get("/api/runs/{run_id}")
@@ -1316,6 +1691,29 @@ async def run_detail(run_id: str):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+@app.get("/api/runs/queue/list")
+async def run_queue():
+    return {"queue": _list_run_queue()}
+
+
+@app.post("/api/runs/queue")
+async def enqueue_run(body: dict):
+    workflow_id = str(body.get("workflow_id", "")).strip()
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+    return _enqueue_run(
+        workflow_id=workflow_id,
+        payload=body.get("payload", {}),
+        priority=int(body.get("priority", 5)),
+        max_attempts=int(body.get("max_attempts", 3)),
+    )
+
+
+@app.post("/api/runs/queue/{queue_id}/process")
+async def process_run_queue_item(queue_id: str):
+    return await _process_queue_item(queue_id)
 
 
 @app.get("/api/approvals")
@@ -1495,7 +1893,7 @@ async def deployment_targets():
 
 @app.get("/api/deploy/plans")
 async def deployment_plans():
-    return {"plans": _list_deployment_plans()}
+    return {"plans": _list_deployment_plans(), "activations": _list_deployment_activations()}
 
 
 @app.post("/api/deploy/plan")
@@ -1551,7 +1949,8 @@ async def activate_deployment_plan(plan_id: str):
     conn.execute("UPDATE deployment_plans SET status = ? WHERE id = ?", (status, plan_id))
     conn.commit()
     conn.close()
-    return {"id": plan_id, "status": status, "plan": plan}
+    activation = _record_deployment_activation(plan_id, plan, status)
+    return {"id": plan_id, "status": status, "plan": plan, "activation": activation}
 
 
 @app.get("/api/ingestions")
@@ -1652,7 +2051,33 @@ async def connector_lifecycle():
     return {
         "connectors": _list_connector_states(),
         "oauth_sessions": _list_oauth_sessions(),
+        "credentials": _list_credentials(),
     }
+
+
+@app.post("/api/vault/credentials")
+async def store_vault_credential(body: dict):
+    service = str(body.get("service", "")).strip().lower()
+    label = str(body.get("label", "")).strip()
+    kind = str(body.get("kind", "access_token")).strip()
+    secret_value = str(body.get("secret", "")).strip()
+    if not service or not label or not secret_value:
+        raise HTTPException(status_code=400, detail="service, label, and secret are required")
+    credential = _store_credential(service, label, kind, secret_value, body.get("metadata", {}))
+    _upsert_connector_state(
+        service=service,
+        status="vault_credential_stored",
+        auth_type="oauth2" if "token" in kind else "api_key",
+        scopes=_oauth_specs().get(service, {}).get("scopes", []),
+        env_vars=[],
+        metadata={"credential_id": credential["id"], "label": label},
+    )
+    return credential
+
+
+@app.get("/api/vault/credentials")
+async def list_vault_credentials():
+    return {"credentials": _list_credentials()}
 
 
 @app.post("/api/connectors/oauth/callback")
@@ -1687,6 +2112,16 @@ async def complete_oauth_connector(body: dict):
         },
     )
     return {"service": service, "status": connector["status"], "connector": connector}
+
+
+@app.get("/api/evals/suites")
+async def eval_suites():
+    return {"suites": [{"id": key, "cases": value} for key, value in EVAL_SUITES.items()], "runs": _list_eval_runs()}
+
+
+@app.post("/api/evals/run")
+async def run_eval_suite(body: dict):
+    return await _run_eval_suite(str(body.get("suite", "core")))
 
 
 @app.post("/api/schemas/inspect")

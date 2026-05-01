@@ -663,3 +663,72 @@ def test_product_gap_analysis_reports_score(monkeypatch, tmp_path):
 
     assert 0 <= gaps["score"] <= 100
     assert {check["id"] for check in gaps["checks"]} >= {"grounded_capabilities", "connector_credentials", "approval_queue"}
+
+
+def test_credential_vault_encrypts_and_masks(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_VAULT_KEY", "unit-test-vault-key")
+
+    stored = main._store_credential("slack", "Unit token", "access_token", "xoxb-secret-token")
+    credentials = main._list_credentials()
+
+    assert stored["masked"] == "xox...ken"
+    assert credentials[0]["masked"] == "xox...ken"
+    assert credentials[0]["valid"] is True
+    assert "xoxb-secret-token" not in str(credentials)
+
+
+@pytest.mark.asyncio
+async def test_run_queue_records_failed_attempt_for_missing_workflow(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    queued = main._enqueue_run("missing_workflow", {"source": "test"}, max_attempts=1)
+    processed = await main._process_queue_item(queued["id"])
+    queue = main._list_run_queue()
+    run = await main.run_detail(processed["run"]["run_id"])
+
+    assert processed["queue_status"] == "failed"
+    assert queue[0]["status"] == "failed"
+    assert queue[0]["last_error"] == "Workflow not found"
+    assert run["stderr"] == "Workflow not found"
+
+
+@pytest.mark.asyncio
+async def test_eval_suite_records_quality_run(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    result = await main._run_eval_suite("core")
+    runs = main._list_eval_runs()
+
+    assert result["suite"] == "core"
+    assert len(result["cases"]) == 3
+    assert 0 <= result["score"] <= 1
+    assert runs[0]["id"] == result["id"]
+
+
+def test_deployment_activation_is_recorded(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    activation = main._record_deployment_activation(
+        "plan_1",
+        {
+            "workflow_id": "workflow_1",
+            "target": "github_actions",
+            "artifacts": {".github/workflows/forgeflow.yml": "name: test"},
+            "readiness": {"blocking": ["workflow_project_missing"]},
+        },
+        "blocked",
+    )
+    activations = main._list_deployment_activations()
+
+    assert activation["status"] == "blocked"
+    assert activations[0]["artifacts"] == {".github/workflows/forgeflow.yml": "name: test"}
+    assert activations[0]["blockers"] == ["workflow_project_missing"]

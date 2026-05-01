@@ -49,6 +49,7 @@ const NAV_ITEMS = [
   { id: 'deployments', label: 'Deployments', Icon: Server },
   { id: 'runs', label: 'Run History', Icon: History },
   { id: 'ingestions', label: 'Ingestions', Icon: PlugZap },
+  { id: 'evals', label: 'Evals', Icon: Gauge },
   { id: 'templates', label: 'Templates', Icon: Layers3 },
   { id: 'roadmap', label: 'Roadmap', Icon: GitBranch },
 ]
@@ -507,6 +508,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
   const [oauthResult, setOauthResult] = useState(null)
   const [oauthError, setOauthError] = useState(null)
   const [callbackForm, setCallbackForm] = useState({ state: '', code: '' })
+  const [credentialForm, setCredentialForm] = useState({ service: 'slack', label: 'Local Slack token', kind: 'access_token', secret: '' })
 
   const startOAuth = async (service) => {
     setOauthError(null)
@@ -534,6 +536,24 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setOauthResult(payload)
+      onRefresh()
+    } catch (err) {
+      setOauthError(err.message)
+    }
+  }
+
+  const storeCredential = async () => {
+    setOauthError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/vault/credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentialForm),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setOauthResult({ service: payload.service, status: 'credential_encrypted', scopes: [], auth_url: null })
+      setCredentialForm({ ...credentialForm, secret: '' })
       onRefresh()
     } catch (err) {
       setOauthError(err.message)
@@ -617,6 +637,37 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
             </div>
           </div>
         )}
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Encrypted credential vault</h3>
+          <div className="mt-4 space-y-3">
+            <input value={credentialForm.service} onChange={(event) => setCredentialForm({ ...credentialForm, service: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="service" />
+            <input value={credentialForm.label} onChange={(event) => setCredentialForm({ ...credentialForm, label: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="label" />
+            <input value={credentialForm.kind} onChange={(event) => setCredentialForm({ ...credentialForm, kind: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="kind" />
+            <input value={credentialForm.secret} onChange={(event) => setCredentialForm({ ...credentialForm, secret: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="secret value" type="password" />
+            <button onClick={storeCredential} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+              <LockKeyhole size={16} /> Store encrypted
+            </button>
+          </div>
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Stored credentials</h3>
+          {(connectorLifecycle?.credentials || []).length === 0 ? <EmptyState title="No vault credentials" body="Store connector tokens locally without exposing raw secret values in the UI." /> : (
+            <div className="mt-4 space-y-2">
+              {connectorLifecycle.credentials.map((credential) => (
+                <div key={credential.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">{credential.label}</div>
+                    <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-300">{credential.kind}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-forge-muted">{credential.service} · {credential.masked}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
@@ -847,6 +898,38 @@ function ApprovalsView({ approvals, onRefresh }) {
 
 function RunsView({ runs, onRefresh }) {
   const [selectedRun, setSelectedRun] = useState(null)
+  const [queueForm, setQueueForm] = useState({ workflow_id: 'workflow-demo', priority: 5, max_attempts: 3 })
+  const [queueError, setQueueError] = useState(null)
+  const queue = runs?.queue || []
+
+  const enqueue = async () => {
+    setQueueError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runs/queue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(queueForm),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setQueueError(err.message)
+    }
+  }
+
+  const processQueue = async (queueId) => {
+    setQueueError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runs/queue/${queueId}/process`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setQueueError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -856,6 +939,37 @@ function RunsView({ runs, onRefresh }) {
       />
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
         <RunList runs={runs?.runs || []} onRefresh={onRefresh} onSelectRun={setSelectedRun} />
+      </div>
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Queue workflow run</h3>
+          <div className="mt-4 space-y-3">
+            <input value={queueForm.workflow_id} onChange={(event) => setQueueForm({ ...queueForm, workflow_id: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" />
+            <input value={queueForm.priority} onChange={(event) => setQueueForm({ ...queueForm, priority: Number(event.target.value) })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" type="number" />
+            <input value={queueForm.max_attempts} onChange={(event) => setQueueForm({ ...queueForm, max_attempts: Number(event.target.value) })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" type="number" />
+            <button onClick={enqueue} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+              <TimerReset size={16} /> Enqueue
+            </button>
+            {queueError && <div className="text-xs text-red-300">{queueError}</div>}
+          </div>
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Durable queue</h3>
+          {queue.length === 0 ? <EmptyState title="Queue empty" body="Queued workflow runs will retry and keep failure reasons." /> : (
+            <div className="mt-4 space-y-2">
+              {queue.map((item) => (
+                <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                    <div className="text-sm">{item.workflow_id}</div>
+                    <span className="text-xs text-forge-muted">{item.status}</span>
+                    <button onClick={() => processQueue(item.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Process</button>
+                  </div>
+                  {item.last_error && <p className="mt-2 text-xs text-amber-200">{item.last_error}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       {selectedRun && (
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
@@ -1162,6 +1276,26 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
           </div>
         )}
       </div>
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="text-sm font-semibold">Deployment activations</h3>
+        {(plans?.activations || []).length === 0 ? <EmptyState title="No activations yet" body="Activating a plan records the target, artifacts, and readiness blockers." /> : (
+          <div className="mt-4 space-y-2">
+            {plans.activations.map((activation) => (
+              <div key={activation.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                  <div className="text-sm">{activation.workflow_id} to {activation.target}</div>
+                  <span className="text-xs text-forge-muted">{activation.status}</span>
+                  <span className="text-xs text-forge-muted">{activation.created_at}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {Object.keys(activation.artifacts || {}).map((name) => <span key={name} className="rounded bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{name}</span>)}
+                  {(activation.blockers || []).map((blocker) => <span key={blocker} className="rounded bg-amber-400/10 px-2 py-1 text-[11px] text-amber-200">{blocker}</span>)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -1230,6 +1364,68 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
             ))}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function EvalsView({ evals, onRefresh }) {
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState(null)
+  const latestRun = evals?.runs?.[0]
+
+  const runSuite = async () => {
+    setRunning(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/evals/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ suite: 'core' }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="Evaluation Lab"
+        title="Measure prompt-to-automation quality before claiming coverage"
+        description="Run deterministic preflight evals against core business automation fixtures so regressions are visible."
+      />
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Core suite</h3>
+          <p className="mt-2 text-sm leading-6 text-forge-muted">{evals?.suites?.[0]?.cases?.length || 0} cases covering HR onboarding, incident routing, and CSV enrichment.</p>
+          <button onClick={runSuite} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+            <Gauge size={16} /> {running ? 'Running...' : 'Run evals'}
+          </button>
+          {error && <div className="mt-3 text-xs text-red-300">{error}</div>}
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Latest score</h3>
+          {!latestRun ? <EmptyState title="No eval run yet" body="Run the core suite to create a quality baseline." /> : (
+            <div className="mt-4 space-y-3">
+              <div className="text-4xl font-semibold text-forge-text">{Math.round(latestRun.score * 100)}%</div>
+              {latestRun.cases.map((item) => (
+                <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium">{item.id}</div>
+                    <span className={`rounded-full px-2 py-1 text-[11px] ${item.passed ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{Math.round(item.score * 100)}%</span>
+                  </div>
+                  <p className="mt-2 text-xs text-forge-muted">Detected: {item.detected.join(', ') || 'none'}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -1335,6 +1531,7 @@ function AppWorkspace({ onLanding }) {
   const ingestions = useApiResource('/api/ingestions', { ingestions: [] })
   const connectorLifecycle = useApiResource('/api/connectors', { connectors: [], oauth_sessions: [] })
   const gaps = useApiResource('/api/product/gaps', { score: 0, checks: [], blockers: [], next: [] })
+  const evals = useApiResource('/api/evals/suites', { suites: [], runs: [] })
 
   const activeLabel = useMemo(() => NAV_ITEMS.find((item) => item.id === activeView)?.label || 'Workspace', [activeView])
 
@@ -1391,6 +1588,7 @@ function AppWorkspace({ onLanding }) {
           {activeView === 'deployments' && <DeploymentsView targets={deploymentTargets.data} plans={deploymentPlans.data} onPlansRefresh={deploymentPlans.refetch} />}
           {activeView === 'runs' && <RunsView runs={runs.data} onRefresh={runs.refetch} />}
           {activeView === 'ingestions' && <IngestionsView ingestions={ingestions.data} onCapabilitiesRefresh={capabilities.refetch} onIngestionsRefresh={ingestions.refetch} />}
+          {activeView === 'evals' && <EvalsView evals={evals.data} onRefresh={evals.refetch} />}
           {activeView === 'templates' && <TemplatesView templates={templates.data} onNavigate={setActiveView} />}
           {activeView === 'roadmap' && <RoadmapView gaps={gaps.data} />}
         </main>
