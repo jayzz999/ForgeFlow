@@ -349,6 +349,64 @@ def test_generated_tests_import_workflow_module():
     assert _normalize_generated_test_imports(test_code) == "import workflow as workflow_module\n\n"
 
 
+@pytest.mark.asyncio
+async def test_builder_preflight_blocks_missing_google_credentials(monkeypatch):
+    from backend import graph
+
+    events = []
+    dag = WorkflowDAG(
+        id="google",
+        name="Google Workflow",
+        description="Send Gmail and append a Sheets row",
+        trigger={"type": "manual"},
+        steps=[
+            WorkflowStep(
+                id="step_1",
+                name="Send Gmail",
+                description="Send a welcome email",
+                api=APIEndpoint(
+                    service="Gmail",
+                    endpoint="/gmail/v1/users/me/messages/send",
+                    method="POST",
+                    description="Send Gmail",
+                    auth_type=AuthType.OAUTH2,
+                    base_url="https://gmail.googleapis.com",
+                ),
+            ),
+            WorkflowStep(
+                id="step_2",
+                name="Append row",
+                description="Append onboarding tracker row",
+                api=APIEndpoint(
+                    service="Google Sheets",
+                    endpoint="/spreadsheets/{id}/values:append",
+                    method="POST",
+                    description="Append row",
+                    auth_type=AuthType.OAUTH2,
+                    base_url="https://sheets.googleapis.com",
+                ),
+            ),
+        ],
+    )
+
+    for key in ("GMAIL_ACCESS_TOKEN", "GMAIL_SENDER_EMAIL", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD", "GOOGLE_SHEETS_ACCESS_TOKEN", "GOOGLE_API_KEY", "GOOGLE_SHEET_ID"):
+        monkeypatch.delenv(key, raising=False)
+
+    async def collect(event):
+        events.append(event)
+
+    result = await graph.credential_preflight_node({
+        "workflow_dag": dag.model_dump(),
+        "phase": "testing",
+        "_event_callback": collect,
+    })
+
+    assert result["phase"] == "awaiting_credentials"
+    assert result["credential_preflight"]["blocked"] is True
+    assert {item["service"] for item in result["credential_preflight"]["missing"]} == {"gmail", "sheets"}
+    assert events[0]["event_type"] == "credentials.required"
+
+
 def test_test_support_files_are_materialized(tmp_path):
     from backend.codegen.test_generator import materialize_extra_files
 

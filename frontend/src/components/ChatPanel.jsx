@@ -104,6 +104,8 @@ export default function ChatPanel({
       'workflow.ready': '✅',
       'workflow.deployed': '🚀',
       'workflow.approval_required': '🎯',
+      'credentials.required': '🔐',
+      'credentials.ready': '🔐',
       'modify.started': '✏️',
       'modify.complete': '✅',
       'tool.calling': '🔧',
@@ -112,7 +114,7 @@ export default function ChatPanel({
     return icons[eventType] || '⚙️'
   }
 
-  const isWorking = phase !== 'idle' && phase !== 'deployed' && phase !== 'failed' && phase !== 'clarification'
+  const isWorking = phase !== 'idle' && phase !== 'deployed' && phase !== 'failed' && phase !== 'clarification' && phase !== 'awaiting_credentials'
 
   return (
     <div className="flex flex-col h-full">
@@ -126,12 +128,14 @@ export default function ChatPanel({
                 ? 'Type to modify the workflow'
                 : phase === 'clarification'
                   ? 'Please answer the question below'
+                  : phase === 'awaiting_credentials'
+                    ? 'Add credentials or use draft-first Runtime/Judge Demo'
                   : 'Describe your workflow in plain English'
               }
             </p>
           </div>
           {/* Reset button — escape hatch for stuck states */}
-          {(phase === 'failed' || isWorking) && onReset && (
+          {(phase === 'failed' || phase === 'awaiting_credentials' || isWorking) && onReset && (
             <button
               onClick={onReset}
               className="px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-400 hover:bg-red-500/20 transition-all"

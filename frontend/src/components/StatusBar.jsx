@@ -18,6 +18,7 @@ const PHASE_CONFIG = {
   idle: { label: 'Ready', color: 'text-forge-muted', Icon: Activity },
   collecting: { label: 'Analyzing Requirements', color: 'text-blue-400', Icon: MessageSquareText },
   clarification: { label: 'Awaiting Your Input', color: 'text-amber-400', Icon: HelpCircle },
+  awaiting_credentials: { label: 'Credentials Required', color: 'text-amber-400', Icon: AlertTriangle },
   planning: { label: 'Planning Workflow', color: 'text-purple-400', Icon: Hammer },
   generating: { label: 'Generating Code', color: 'text-indigo-400', Icon: Cpu },
   testing: { label: 'Testing in Sandbox', color: 'text-yellow-400', Icon: PackageCheck },

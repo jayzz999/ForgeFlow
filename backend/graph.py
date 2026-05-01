@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Coroutine, Literal, Optional, TypedDict
@@ -49,6 +50,7 @@ class ForgeFlowState(TypedDict, total=False):
 
     # Execution
     execution_result: dict | None
+    credential_preflight: dict | None
     debug_attempts: int
     debug_history: list[dict]
 
@@ -310,6 +312,71 @@ def route_after_plan(state: ForgeFlowState) -> str:
     return "valid"
 
 
+SERVICE_CREDENTIAL_OPTIONS = {
+    "slack": (("SLACK_BOT_TOKEN",),),
+    "gmail": (("GMAIL_ACCESS_TOKEN", "GMAIL_SENDER_EMAIL"), ("GMAIL_ADDRESS", "GMAIL_APP_PASSWORD")),
+    "sheets": (("GOOGLE_SHEETS_ACCESS_TOKEN", "GOOGLE_SHEET_ID"), ("GOOGLE_API_KEY", "GOOGLE_SHEET_ID")),
+    "calendar": (("GOOGLE_CALENDAR_ACCESS_TOKEN",),),
+    "hubspot": (("HUBSPOT_ACCESS_TOKEN",),),
+    "stripe": (("STRIPE_API_KEY",),),
+    "zendesk": (("ZENDESK_API_TOKEN", "ZENDESK_SUBDOMAIN"),),
+    "okta": (("OKTA_API_TOKEN", "OKTA_ORG_URL"),),
+    "teams": (("TEAMS_WEBHOOK_URL",),),
+}
+
+
+def _service_key(service_name: str) -> str:
+    normalized = (service_name or "").lower()
+    if "gmail" in normalized or normalized == "email":
+        return "gmail"
+    if "sheet" in normalized or "spreadsheet" in normalized:
+        return "sheets"
+    if "calendar" in normalized:
+        return "calendar"
+    if "slack" in normalized:
+        return "slack"
+    if "hubspot" in normalized:
+        return "hubspot"
+    if "stripe" in normalized:
+        return "stripe"
+    if "zendesk" in normalized:
+        return "zendesk"
+    if "okta" in normalized:
+        return "okta"
+    if "teams" in normalized:
+        return "teams"
+    return normalized
+
+
+def _credential_options_satisfied(options: tuple[tuple[str, ...], ...]) -> bool:
+    return any(all(os.getenv(name) for name in group) for group in options)
+
+
+def _missing_credential_requirements(dag_data: dict) -> list[dict]:
+    missing = []
+    seen = set()
+    for step in dag_data.get("steps", []):
+        api = step.get("api") or {}
+        service = _service_key(api.get("service", ""))
+        if service in seen or service in {"", "http", "webhook", "rest api"}:
+            continue
+        seen.add(service)
+        options = SERVICE_CREDENTIAL_OPTIONS.get(service)
+        if not options or _credential_options_satisfied(options):
+            continue
+        missing.append({
+            "service": service,
+            "step_id": step.get("id"),
+            "step_name": step.get("name"),
+            "credential_options": [list(group) for group in options],
+            "message": (
+                f"{api.get('service', service)} needs credentials before Builder can run live code. "
+                "Add one credential option or use Runtime/Judge Demo for draft-first preview."
+            ),
+        })
+    return missing
+
+
 # ── Node 4: Generate Code ────────────────────────────────────
 
 async def generate_code_node(state: ForgeFlowState) -> dict:
@@ -417,6 +484,38 @@ async def test_generation_node(state: ForgeFlowState) -> dict:
     return {
         "test_code": test_code,
         "test_results": test_results,
+    }
+
+
+# ── Node 5c: Credential Preflight ─────────────────────────────
+
+async def credential_preflight_node(state: ForgeFlowState) -> dict:
+    """Stop generated live execution before Docker if required credentials are missing."""
+    dag_data = state.get("workflow_dag", {}) or {}
+    missing = _missing_credential_requirements(dag_data)
+    if not missing:
+        await _emit(state, "credentials.ready", "Credentials preflight passed for executable services.", {
+            "services_checked": list({
+                _service_key((step.get("api") or {}).get("service", ""))
+                for step in dag_data.get("steps", [])
+                if (step.get("api") or {}).get("service")
+            }),
+        })
+        return {"credential_preflight": {"blocked": False, "missing": []}, "phase": "testing"}
+
+    await _emit(state, "credentials.required", "Credentials required before live Builder execution.", {
+        "missing": missing,
+        "next_actions": [
+            "Add the listed credentials in .env or the credential vault.",
+            "Use Runtime or Judge Demo to inspect draft-first plans without live provider calls.",
+            "Re-run Builder after the credentials are available.",
+        ],
+    })
+    return {
+        "credential_preflight": {"blocked": True, "missing": missing},
+        "phase": "awaiting_credentials",
+        "approval_status": "needs_credentials",
+        "final_message": "Builder generated and tested the workflow, but live execution is blocked until credentials are configured.",
     }
 
 
@@ -730,6 +829,14 @@ def route_after_execution(state: ForgeFlowState) -> str:
     return "failure"
 
 
+def route_after_credential_preflight(state: ForgeFlowState) -> str:
+    """Route after credential preflight: execute only when live credentials are present."""
+    preflight = state.get("credential_preflight") or {}
+    if preflight.get("blocked"):
+        return "blocked"
+    return "ready"
+
+
 def route_after_debug(state: ForgeFlowState) -> str:
     """Route after debug: retry or give up?"""
     attempts = state.get("debug_attempts", 0)
@@ -761,6 +868,7 @@ def build_graph():
     graph.add_node("generate_code", generate_code_node)
     graph.add_node("review_security", security_review_node)
     graph.add_node("generate_tests", test_generation_node)      # NEW: auto-generate test cases
+    graph.add_node("check_credentials", credential_preflight_node)
     graph.add_node("sandbox_execute", sandbox_execute_node)
     graph.add_node("self_debug", self_debug_node)
     graph.add_node("present_to_user", present_to_user_node)     # UPDATED: approval gate
@@ -781,7 +889,11 @@ def build_graph():
     })
     graph.add_edge("generate_code", "review_security")
     graph.add_edge("review_security", "generate_tests")   # security → tests
-    graph.add_edge("generate_tests", "sandbox_execute")    # tests → sandbox
+    graph.add_edge("generate_tests", "check_credentials")
+    graph.add_conditional_edges("check_credentials", route_after_credential_preflight, {
+        "ready": "sandbox_execute",
+        "blocked": END,
+    })
 
     graph.add_conditional_edges("sandbox_execute", route_after_execution, {
         "success": "present_to_user",
@@ -845,6 +957,7 @@ async def run_forgeflow_pipeline(
         "test_code": None,
         "test_results": None,
         "execution_result": None,
+        "credential_preflight": None,
         "debug_attempts": 0,
         "debug_history": [],
         "approval_status": "pending",
@@ -872,6 +985,7 @@ async def run_forgeflow_pipeline(
         "workflow_dag": final_state.get("workflow_dag"),
         "generated_code": final_state.get("generated_code"),
         "execution_result": final_state.get("execution_result"),
+        "credential_preflight": final_state.get("credential_preflight"),
         "test_results": final_state.get("test_results"),
         "debug_history": final_state.get("debug_history", []),
         "deployed": final_state.get("deployed", False),
