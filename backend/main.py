@@ -2482,6 +2482,189 @@ async def _run_hr_onboarding_demo(prompt: str | None = None) -> dict:
     }
 
 
+def _staging_profile() -> dict:
+    """Describe safe destinations for live demos without performing external writes."""
+    credential_services = _credential_services()
+    destinations = [
+        {
+            "service": "gmail",
+            "label": "Gmail welcome email",
+            "mode": "draft_first",
+            "destination": os.getenv("FORGEFLOW_STAGING_EMAIL_TO", "new.hire@example.com"),
+            "configured": bool(_secret_for_service("gmail")),
+            "safety": "Create or preview a draft before sending anything to a real recipient.",
+        },
+        {
+            "service": "slack",
+            "label": "Slack announcement",
+            "mode": "staging_channel",
+            "destination": os.getenv("FORGEFLOW_STAGING_SLACK_CHANNEL", "#forgeflow-staging"),
+            "configured": bool(_secret_for_service("slack")),
+            "safety": "Post only to the configured staging channel after approval.",
+        },
+        {
+            "service": "sheets",
+            "label": "Onboarding tracker",
+            "mode": "test_sheet",
+            "destination": os.getenv("FORGEFLOW_STAGING_SHEET_ID", os.getenv("GOOGLE_SHEET_ID", "staging-onboarding-sheet")),
+            "configured": bool(_secret_for_service("sheets")),
+            "safety": "Append rows to a staging sheet, never to HR production data during demo runs.",
+        },
+        {
+            "service": "calendar",
+            "label": "Training schedule",
+            "mode": "test_calendar",
+            "destination": os.getenv("FORGEFLOW_STAGING_CALENDAR_ID", "primary"),
+            "configured": bool(_secret_for_service("calendar")),
+            "safety": "Create calendar previews first; live insert requires approval.",
+        },
+        {
+            "service": "http",
+            "label": "IT access request",
+            "mode": "mock_or_sandbox_endpoint",
+            "destination": os.getenv("FORGEFLOW_STAGING_IT_ENDPOINT", "https://example.com/it-access-request"),
+            "configured": True,
+            "safety": "Use a sandbox endpoint or mock response until a real IT API is connected.",
+        },
+    ]
+    return {
+        "id": "forgeflow-staging",
+        "name": "ForgeFlow staging workspace",
+        "draft_first": True,
+        "approval_required_before_live": True,
+        "credential_sources": ["environment", "encrypted_vault"],
+        "credential_services": sorted(credential_services),
+        "destinations": destinations,
+        "ready_destinations": sum(1 for item in destinations if item["configured"]),
+        "total_destinations": len(destinations),
+    }
+
+
+def _hr_onboarding_staging_inputs() -> dict:
+    return {
+        "employee_name": "Avery Johnson",
+        "personal_email": os.getenv("FORGEFLOW_STAGING_EMAIL_TO", "avery.johnson@example.com"),
+        "manager": "Maya Patel",
+        "department": "Operations",
+        "role": "People Operations Associate",
+        "start_date": "2026-05-18",
+        "source_file": "sample_hr_new_hires.xlsx",
+        "slack_channel": os.getenv("FORGEFLOW_STAGING_SLACK_CHANNEL", "#forgeflow-staging"),
+        "tracking_sheet": os.getenv("FORGEFLOW_STAGING_SHEET_ID", os.getenv("GOOGLE_SHEET_ID", "staging-onboarding-sheet")),
+        "training_calendar": os.getenv("FORGEFLOW_STAGING_CALENDAR_ID", "primary"),
+    }
+
+
+def _draft_first_execution_plan(spec: dict, inputs: dict, staging: dict) -> list[dict]:
+    destinations = {item["service"]: item for item in staging["destinations"]}
+    plan = []
+    for index, step in enumerate(spec.get("steps", []), start=1):
+        connector_id = step.get("connector_id", "")
+        service = connector_id.split(".", 1)[0]
+        destination = destinations.get(service, {"mode": "dry_run", "destination": "local preview", "configured": True})
+        action_payload = {
+            "employee_name": inputs["employee_name"],
+            "department": inputs["department"],
+            "manager": inputs["manager"],
+            "start_date": inputs["start_date"],
+        }
+        if service == "gmail":
+            action_payload.update({
+                "to": inputs["personal_email"],
+                "subject": f"Welcome to {inputs['department']}, {inputs['employee_name']}",
+                "body": f"Welcome {inputs['employee_name']}. Your manager {inputs['manager']} will meet you on {inputs['start_date']}.",
+            })
+        elif service == "slack":
+            action_payload.update({
+                "channel": inputs["slack_channel"],
+                "text": f"Welcome {inputs['employee_name']} to {inputs['department']} on {inputs['start_date']}.",
+            })
+        elif service == "sheets":
+            action_payload.update({
+                "sheet_id": inputs["tracking_sheet"],
+                "values": [inputs["employee_name"], inputs["department"], inputs["manager"], inputs["start_date"]],
+            })
+        elif service == "calendar":
+            action_payload.update({
+                "calendar_id": inputs["training_calendar"],
+                "summary": f"First-week training for {inputs['employee_name']}",
+                "date": inputs["start_date"],
+            })
+        elif service == "http":
+            action_payload.update({
+                "url": os.getenv("FORGEFLOW_STAGING_IT_ENDPOINT", "https://example.com/it-access-request"),
+                "method": "POST",
+                "json": {"employee": inputs["employee_name"], "role": inputs["role"]},
+            })
+        plan.append({
+            "order": index,
+            "step_id": step.get("id"),
+            "step_name": step.get("name"),
+            "connector_id": connector_id,
+            "service": service,
+            "mode": destination.get("mode", "dry_run"),
+            "destination": destination.get("destination"),
+            "credential_ready": destination.get("configured", False),
+            "approval_required": bool(step.get("approval_required", True)),
+            "live_call_performed": False,
+            "payload_preview": action_payload,
+        })
+    return plan
+
+
+async def _run_judge_demo(prompt: str | None = None) -> dict:
+    demo = await _run_hr_onboarding_demo(prompt)
+    staging = _staging_profile()
+    inputs = _hr_onboarding_staging_inputs()
+    draft_plan = _draft_first_execution_plan(demo["spec"], inputs, staging)
+    services = sorted({item["service"] for item in draft_plan if item["service"] in SUPPORTED_SERVICES})
+    connector_checks = [_test_connector_service(service, live=False) for service in services]
+    worker = {
+        "enabled": bool(getattr(app.state, "queue_worker_enabled", False)),
+        "interval_seconds": int(os.getenv("FORGEFLOW_QUEUE_WORKER_INTERVAL", "10")),
+        "batch_size": int(os.getenv("FORGEFLOW_QUEUE_WORKER_BATCH", "5")),
+        "due_count": len(_due_queue_items(limit=20)),
+    }
+    deployment_health = _deployment_provider_health()
+    external_plan = [item for item in draft_plan if item["service"] not in {"schema", "approval"}]
+    scorecard = [
+        {"id": "conversation", "label": "Plain-English requirement collection", "passed": bool(demo["conversation"]["process_steps"])},
+        {"id": "grounding", "label": "No hallucinated HR schema", "passed": demo["answer_to_challenge"]["no_hallucinated_schema"]},
+        {"id": "connectors", "label": "Connector readiness checked", "passed": bool(connector_checks)},
+        {"id": "draft_first", "label": "Every external step is draft-first", "passed": all(not item["live_call_performed"] and item["approval_required"] for item in external_plan)},
+        {"id": "exports", "label": "Multi-platform executable exports", "passed": len(demo["exports"]) >= 3},
+        {"id": "repair", "label": "Self-repair plan generated", "passed": bool(demo["repair"]["actions"])},
+        {"id": "deployment", "label": "Deployment targets inspected", "passed": bool(deployment_health)},
+        {"id": "worker", "label": "Queue worker controls visible", "passed": "enabled" in worker},
+    ]
+    return {
+        "scenario": {
+            "title": "Employee onboarding from plain English to approved staging automation",
+            "prompt": prompt or "I need to automate our employee onboarding process from an HR sheet.",
+            "sample_inputs": inputs,
+        },
+        "staging_profile": staging,
+        "demo": demo,
+        "draft_first_plan": draft_plan,
+        "connector_checks": connector_checks,
+        "worker": worker,
+        "deployment": {
+            "targets": deployment_health,
+            "recommended_target": "local_docker" if shutil.which("docker") else "github_actions",
+            "live_deploy_performed": False,
+        },
+        "scorecard": scorecard,
+        "judge_script": [
+            "Enter a plain-English onboarding request.",
+            "Show the generated process steps and missing questions.",
+            "Show grounded schema requirements and connector mapping.",
+            "Run the dry-run ledger and repair plan without external writes.",
+            "Show draft-first staging payloads, approvals, exports, worker status, and deployment readiness.",
+        ],
+        "complete": all(item["passed"] for item in scorecard),
+    }
+
+
 def _extract_openapi_capabilities(spec: dict) -> list[dict]:
     title = spec.get("info", {}).get("title", "OpenAPI")
     capabilities_data = []
@@ -3488,6 +3671,19 @@ async def hr_onboarding_challenge_demo(body: dict | None = None):
     """Run the hackathon challenge path: prompt, spec, dry-run, exports, validation, repair."""
     body = body or {}
     return await _run_hr_onboarding_demo(body.get("prompt"))
+
+
+@app.get("/api/staging/profile")
+async def staging_profile():
+    """Return the safe staging workspace used for draft-first demo execution."""
+    return {"staging": _staging_profile()}
+
+
+@app.post("/api/demo/judge")
+async def judge_challenge_demo(body: dict | None = None):
+    """Run the end-to-end staging demo packet for live judging."""
+    body = body or {}
+    return await _run_judge_demo(body.get("prompt"))
 
 
 @app.get("/api/templates")

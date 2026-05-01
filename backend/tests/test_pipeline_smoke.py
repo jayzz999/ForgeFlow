@@ -914,6 +914,38 @@ async def test_hr_onboarding_demo_covers_challenge_loop(monkeypatch, tmp_path):
     assert main._list_workflow_exports(result["spec"]["id"])
 
 
+def test_staging_profile_is_draft_first(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_STAGING_SLACK_CHANNEL", "#unit-staging")
+
+    profile = main._staging_profile()
+
+    assert profile["draft_first"] is True
+    assert profile["approval_required_before_live"] is True
+    assert any(item["destination"] == "#unit-staging" for item in profile["destinations"])
+    assert {item["service"] for item in profile["destinations"]} >= {"gmail", "slack", "sheets", "calendar", "http"}
+
+
+@pytest.mark.asyncio
+async def test_judge_demo_covers_end_to_end_staging(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    result = await main._run_judge_demo("Automate employee onboarding from an HR sheet with Gmail, Slack, Sheets, Calendar, and approval.")
+
+    assert result["complete"] is True
+    assert result["deployment"]["live_deploy_performed"] is False
+    assert all(item["live_call_performed"] is False for item in result["draft_first_plan"])
+    assert all(item["approval_required"] is True for item in result["draft_first_plan"] if item["service"] not in {"schema", "approval"})
+    assert {item["service"] for item in result["connector_checks"]} >= {"gmail", "slack", "sheets"}
+    assert {item["platform"] for item in result["demo"]["exports"]} == {"forgeflow", "n8n", "github_actions"}
+    assert result["worker"]["batch_size"] >= 1
+    assert "sample_inputs" in result["scenario"]
+
+
 @pytest.mark.asyncio
 async def test_export_validate_and_repair_runtime_run(monkeypatch, tmp_path):
     from backend import main

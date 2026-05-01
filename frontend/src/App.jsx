@@ -43,6 +43,7 @@ const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', Icon: LayoutDashboard },
   { id: 'builder', label: 'Builder', Icon: Workflow },
   { id: 'runtime', label: 'Runtime', Icon: Activity },
+  { id: 'judge', label: 'Judge Demo', Icon: Sparkles },
   { id: 'connectors', label: 'Connectors', Icon: Blocks },
   { id: 'schemas', label: 'Schemas', Icon: FileSpreadsheet },
   { id: 'approvals', label: 'Approvals', Icon: ClipboardCheck },
@@ -2056,6 +2057,138 @@ function TemplatesView({ templates, onNavigate }) {
   )
 }
 
+function JudgeDemoView() {
+  const [prompt, setPrompt] = useState('I need to automate employee onboarding from an HR Excel sheet: send a welcome email, post a Slack announcement, create an IT access request, append the tracking sheet, schedule training, test it, and wait for approval before anything live.')
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const runDemo = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/demo/judge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setResult(payload)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const score = result?.scorecard ? Math.round((result.scorecard.filter((item) => item.passed).length / result.scorecard.length) * 100) : 0
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="Live Challenge Demo"
+        title="Plain English to safe staging automation"
+        description="Run the full judged story: conversation, grounded HR schema, connector checks, draft-first execution payloads, approvals, exports, worker readiness, and deployment readiness."
+      />
+      <div className="grid gap-4 xl:grid-cols-[0.85fr_1.15fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Business prompt</h3>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={7}
+            className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm leading-6 outline-none focus:border-sky-400/50"
+          />
+          <button onClick={runDemo} disabled={loading} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200 disabled:opacity-50">
+            <Rocket size={16} /> {loading ? 'Running...' : 'Run judge demo'}
+          </button>
+          {error && <div className="mt-4 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-300">{error}</div>}
+          {result && (
+            <div className="mt-5 space-y-3">
+              <Metric label="Demo readiness" value={`${score}%`} Icon={Gauge} tone={result.complete ? 'green' : 'amber'} />
+              {result.scorecard.map((item) => (
+                <ReadinessRow key={item.id} label={item.label} value={item.passed ? 'pass' : 'needs work'} ok={item.passed} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Staging workspace</h3>
+          {!result ? <EmptyState title="No demo run yet" body="Run the judge demo to see safe destinations and approval-first execution." /> : (
+            <div className="mt-4 space-y-3">
+              <div className="grid gap-3 md:grid-cols-3">
+                <Metric label="Automation steps" value={result.demo.spec.steps.length} Icon={Workflow} tone="sky" />
+                <Metric label="Exports" value={result.demo.exports.length} Icon={Cloud} tone="green" />
+                <Metric label="Safe destinations" value={`${result.staging_profile.ready_destinations}/${result.staging_profile.total_destinations}`} Icon={ShieldCheck} tone="amber" />
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                {result.staging_profile.destinations.map((item) => (
+                  <div key={item.service} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{item.label}</div>
+                      <span className={`rounded-full px-2 py-1 text-[11px] ${item.configured ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{item.mode}</span>
+                    </div>
+                    <p className="mt-2 text-xs text-forge-muted">{item.destination}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {result && (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+            <h3 className="text-sm font-semibold">Draft-first execution plan</h3>
+            <div className="mt-4 space-y-3">
+              {result.draft_first_plan.map((step) => (
+                <div key={step.step_id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">{step.order}. {step.step_name}</div>
+                    <span className="rounded-full bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{step.mode}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-forge-muted">{step.connector_id} {'->'} {step.destination}</p>
+                  <p className="mt-2 line-clamp-2 text-xs text-forge-muted">{JSON.stringify(step.payload_preview).slice(0, 220)}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+              <h3 className="text-sm font-semibold">Connector checks</h3>
+              <div className="mt-4 grid gap-2 md:grid-cols-2">
+                {result.connector_checks.map((check) => (
+                  <ReadinessRow key={check.id} label={check.service} value={check.status} ok={['ready', 'ready_to_probe', 'connected'].includes(check.status)} />
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+              <h3 className="text-sm font-semibold">Worker and deployment readiness</h3>
+              <div className="mt-4 space-y-2">
+                <ReadinessRow label="Queue worker controls" value={result.worker.enabled ? 'on' : 'available'} ok />
+                <ReadinessRow label="Due queue items" value={String(result.worker.due_count)} ok={result.worker.due_count === 0} />
+                {result.deployment.targets.map((target) => (
+                  <ReadinessRow key={target.id} label={target.name} value={target.status} ok={target.status === 'pass'} />
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+              <h3 className="text-sm font-semibold">Demo script</h3>
+              <div className="mt-3 space-y-2">
+                {result.judge_script.map((item) => <div key={item} className="text-xs leading-5 text-forge-muted">{item}</div>)}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function RoadmapView({ gaps }) {
   const phases = [
     ['Grounding', 'MCP adapter, OpenAPI ingestion, file/database schema discovery, credential broker, smart missing-info questions.'],
@@ -2193,6 +2326,7 @@ function AppWorkspace({ onLanding }) {
           {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={navigateView} />}
           {activeView === 'builder' && <BuilderView {...ws} />}
           {activeView === 'runtime' && <RuntimeView specs={specs.data} adapters={connectorAdapters.data} runtimeRuns={runtimeRuns.data} onSpecsRefresh={specs.refetch} onRunsRefresh={runtimeRuns.refetch} onGapsRefresh={gaps.refetch} />}
+          {activeView === 'judge' && <JudgeDemoView />}
           {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} />}
           {activeView === 'schemas' && <SchemaExplorerView />}
           {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} onRefresh={approvals.refetch} />}
