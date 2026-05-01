@@ -42,6 +42,7 @@ const CodePanel = lazy(() => import('./components/CodePanel'))
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', Icon: LayoutDashboard },
   { id: 'builder', label: 'Builder', Icon: Workflow },
+  { id: 'runtime', label: 'Runtime', Icon: Activity },
   { id: 'connectors', label: 'Connectors', Icon: Blocks },
   { id: 'schemas', label: 'Schemas', Icon: FileSpreadsheet },
   { id: 'approvals', label: 'Approvals', Icon: ClipboardCheck },
@@ -1431,6 +1432,164 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
   )
 }
 
+function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefresh, onGapsRefresh }) {
+  const [prompt, setPrompt] = useState('Automate HR onboarding from an Excel sheet, draft a Gmail welcome email, post a Slack announcement, and append a Google Sheets tracking row.')
+  const [activeSpec, setActiveSpec] = useState(null)
+  const [message, setMessage] = useState(null)
+  const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  const compileSpec = async () => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/specs/compile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setActiveSpec(payload.spec)
+      setMessage(`Compiled ${payload.spec.steps.length} steps with ${payload.spec.approval_gates.length} approval gates`)
+      onSpecsRefresh()
+      onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const dryRunSpec = async (specId) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runtime/specs/${specId}/dry-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs: { source: 'runtime-ui' } }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setMessage(`Dry-run ${payload.run.status}: ${payload.run.steps.length} step ledger entries`)
+      onRunsRefresh()
+      onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const latestSpec = activeSpec || specs?.specs?.[0]
+  const runs = runtimeRuns?.runs || []
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="Runtime Orchestrator"
+        title="Compile prompts into specs before writing code"
+        description="ForgeFlow now creates a canonical automation spec, maps it to typed connector adapters, and records dry-run steps in a structured runtime ledger."
+      />
+      <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Canonical spec compiler</h3>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={6}
+            className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm leading-6 outline-none focus:border-sky-400/50"
+          />
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={compileSpec} disabled={loading} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200 disabled:opacity-50">
+              <Workflow size={16} /> Compile spec
+            </button>
+            {latestSpec && (
+              <button onClick={() => dryRunSpec(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
+                <Play size={16} /> Dry-run spec
+              </button>
+            )}
+          </div>
+          {(message || error) && <div className={`mt-4 rounded-lg border p-3 text-xs ${error ? 'border-red-400/30 bg-red-400/10 text-red-300' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'}`}>{error || message}</div>}
+        </div>
+
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Latest spec</h3>
+          {!latestSpec ? <EmptyState title="No spec compiled" body="Compile a prompt to see the canonical goal, connectors, steps, tests, and approval gates." /> : (
+            <div className="mt-4 space-y-3">
+              <div className="text-sm font-medium">{latestSpec.goal}</div>
+              <div className="flex flex-wrap gap-2">
+                <span className="rounded bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{latestSpec.status}</span>
+                <span className="rounded bg-forge-bg px-2 py-1 text-[11px] text-forge-muted">{latestSpec.steps.length} steps</span>
+                <span className="rounded bg-forge-bg px-2 py-1 text-[11px] text-forge-muted">{latestSpec.approval_gates.length} gates</span>
+              </div>
+              <div className="space-y-2">
+                {latestSpec.steps.map((step) => (
+                  <div key={step.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{step.name}</div>
+                      <span className="text-xs text-forge-muted">{step.connector_id}</span>
+                    </div>
+                    <p className="mt-2 text-xs text-forge-muted">{step.purpose}</p>
+                  </div>
+                ))}
+              </div>
+              {latestSpec.questions?.length ? (
+                <div className="rounded-lg bg-amber-400/10 p-3 text-xs text-amber-200">{latestSpec.questions.length} missing facts before live execution</div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Typed connector adapters</h3>
+          <div className="mt-4 space-y-2">
+            {(adapters?.adapters || []).slice(0, 12).map((adapter) => (
+              <div key={adapter.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium">{adapter.label}</div>
+                  <span className={`rounded-full px-2 py-1 text-[11px] ${adapter.status === 'ready' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{adapter.status}</span>
+                </div>
+                <p className="mt-2 text-xs text-forge-muted">{adapter.methods.join(' · ')}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Runtime ledger</h3>
+          {runs.length === 0 ? <EmptyState title="No runtime runs" body="Dry-run a compiled spec to record step-level execution state." /> : (
+            <div className="mt-4 space-y-3">
+              {runs.map((run) => (
+                <div key={run.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">{run.spec_id}</div>
+                    <span className="rounded-full bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{run.status}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-forge-muted">{run.mode} · {run.started_at}</div>
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {run.steps.map((step) => (
+                      <div key={step.id} className="rounded-lg border border-forge-border bg-forge-panel px-3 py-2">
+                        <div className="text-xs font-medium">{step.step_id}</div>
+                        <div className="mt-1 text-[11px] text-forge-muted">{step.connector_id} · {step.status}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function EvalsView({ evals, onRefresh }) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState(null)
@@ -1592,6 +1751,9 @@ function AppWorkspace({ onLanding }) {
   const deploymentPlans = useApiResource('/api/deploy/plans', { plans: [] })
   const ingestions = useApiResource('/api/ingestions', { ingestions: [] })
   const connectorLifecycle = useApiResource('/api/connectors', { connectors: [], oauth_sessions: [] })
+  const connectorAdapters = useApiResource('/api/connectors/adapters', { adapters: [] })
+  const specs = useApiResource('/api/specs', { specs: [] })
+  const runtimeRuns = useApiResource('/api/runtime/runs', { runs: [] })
   const gaps = useApiResource('/api/product/gaps', { score: 0, checks: [], blockers: [], next: [] })
   const evals = useApiResource('/api/evals/suites', { suites: [], runs: [] })
 
@@ -1643,6 +1805,7 @@ function AppWorkspace({ onLanding }) {
         <main className="min-h-0 flex-1 overflow-auto p-6">
           {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={setActiveView} />}
           {activeView === 'builder' && <BuilderView {...ws} />}
+          {activeView === 'runtime' && <RuntimeView specs={specs.data} adapters={connectorAdapters.data} runtimeRuns={runtimeRuns.data} onSpecsRefresh={specs.refetch} onRunsRefresh={runtimeRuns.refetch} onGapsRefresh={gaps.refetch} />}
           {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} />}
           {activeView === 'schemas' && <SchemaExplorerView />}
           {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} onRefresh={approvals.refetch} />}

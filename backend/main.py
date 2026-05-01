@@ -232,6 +232,47 @@ def _platform_db() -> sqlite3.Connection:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS automation_specs (
+            id TEXT PRIMARY KEY,
+            goal TEXT NOT NULL,
+            trigger_json TEXT NOT NULL,
+            inputs_json TEXT NOT NULL,
+            connectors_json TEXT NOT NULL,
+            steps_json TEXT NOT NULL,
+            approval_gates_json TEXT NOT NULL,
+            tests_json TEXT NOT NULL,
+            deployment_json TEXT NOT NULL,
+            questions_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS runtime_runs (
+            id TEXT PRIMARY KEY,
+            spec_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            output_json TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS runtime_steps (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            connector_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 1,
+            input_json TEXT NOT NULL,
+            output_json TEXT NOT NULL,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS ingestions (
             id TEXT PRIMARY KEY,
             source_type TEXT NOT NULL,
@@ -1095,6 +1136,350 @@ def _all_capabilities() -> list[dict]:
     return capabilities_data
 
 
+def _connector_adapters() -> list[dict]:
+    connectors = {item["service"]: item for item in _list_connector_states()}
+    capability_by_id = {item["id"]: item for item in _all_capabilities()}
+    adapter_specs = [
+        ("schema.inspect_file", "schema", "Inspect uploaded file", "read_only", ["auth_check", "schema_discovery", "dry_run"]),
+        ("slack.post_message", "slack", "Post Slack message", "external_write", ["auth_check", "dry_run", "execute", "compensate"]),
+        ("gmail.send_email", "gmail", "Send Gmail email", "external_write", ["auth_check", "dry_run", "execute", "compensate"]),
+        ("sheets.append_row", "sheets", "Append Google Sheets row", "external_write", ["auth_check", "schema_discovery", "dry_run", "execute"]),
+        ("http.request", "http", "Call HTTP API", "network_call", ["auth_check", "schema_discovery", "dry_run", "execute"]),
+        ("approval.wait", "approval", "Human approval gate", "approval_required", ["dry_run", "execute"]),
+    ]
+    adapters = []
+    for capability_id, service, label, risk, methods in adapter_specs:
+        capability = capability_by_id.get(capability_id, {})
+        state = connectors.get(service, {})
+        configured = bool(state.get("env_status", {}).get("configured") or state.get("metadata", {}).get("vault_credential") or service in {"schema", "http", "approval"})
+        adapters.append({
+            "id": capability_id,
+            "service": service,
+            "label": capability.get("label") or label,
+            "risk": capability.get("risk") or risk,
+            "methods": methods,
+            "configured": configured,
+            "status": "ready" if configured else "needs_credentials",
+            "auth": state.get("auth_type", "none" if service in {"schema", "http", "approval"} else "api_key"),
+            "capability": capability,
+        })
+    for capability in capability_by_id.values():
+        if capability["id"] in {item["id"] for item in adapters}:
+            continue
+        adapters.append({
+            "id": capability["id"],
+            "service": capability.get("source", "custom"),
+            "label": capability.get("label", capability["id"]),
+            "risk": capability.get("risk", "tool_call"),
+            "methods": ["schema_discovery", "dry_run", "execute"],
+            "configured": not capability.get("requires_auth"),
+            "status": "ready" if not capability.get("requires_auth") else "needs_credentials",
+            "auth": "custom",
+            "capability": capability,
+        })
+    return adapters
+
+
+def _capability_for_service(service: str) -> str:
+    mapping = {
+        "slack": "slack.post_message",
+        "gmail": "gmail.send_email",
+        "sheets": "sheets.append_row",
+        "http": "http.request",
+    }
+    return mapping.get(service, "http.request")
+
+
+def _approval_required_for_capability(capability_id: str) -> bool:
+    capability = next((item for item in _all_capabilities() if item["id"] == capability_id), {})
+    return capability.get("risk") in {"external_write", "approval_required"} or capability_id in {
+        "slack.post_message",
+        "gmail.send_email",
+        "sheets.append_row",
+    }
+
+
+def _store_automation_spec(spec: dict) -> dict:
+    spec_id = spec.get("id") or _stable_id("spec", {"goal": spec.get("goal"), "steps": spec.get("steps")})
+    now = _now_iso()
+    record = {
+        **spec,
+        "id": spec_id,
+        "created_at": spec.get("created_at", now),
+        "updated_at": now,
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO automation_specs
+        (id, goal, trigger_json, inputs_json, connectors_json, steps_json, approval_gates_json, tests_json, deployment_json, questions_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["id"],
+            record["goal"],
+            json.dumps(record.get("trigger", {})),
+            json.dumps(record.get("inputs", {})),
+            json.dumps(record.get("connectors", [])),
+            json.dumps(record.get("steps", [])),
+            json.dumps(record.get("approval_gates", [])),
+            json.dumps(record.get("tests", [])),
+            json.dumps(record.get("deployment", {})),
+            json.dumps(record.get("questions", [])),
+            record.get("status", "draft"),
+            record["created_at"],
+            record["updated_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return record
+
+
+def _row_to_automation_spec(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "goal": row["goal"],
+        "trigger": _json_loads(row["trigger_json"], {}),
+        "inputs": _json_loads(row["inputs_json"], {}),
+        "connectors": _json_loads(row["connectors_json"], []),
+        "steps": _json_loads(row["steps_json"], []),
+        "approval_gates": _json_loads(row["approval_gates_json"], []),
+        "tests": _json_loads(row["tests_json"], []),
+        "deployment": _json_loads(row["deployment_json"], {}),
+        "questions": _json_loads(row["questions_json"], []),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _list_automation_specs(limit: int = 20) -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM automation_specs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [_row_to_automation_spec(row) for row in rows]
+
+
+def _get_automation_spec(spec_id: str) -> dict | None:
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM automation_specs WHERE id = ?", (spec_id,)).fetchone()
+    conn.close()
+    return _row_to_automation_spec(row) if row else None
+
+
+async def _compile_automation_spec(prompt: str, context: dict | None = None) -> dict:
+    preflight = await preflight_prompt({"prompt": prompt})
+    connectors = []
+    steps = []
+    approval_gates = []
+    adapters_by_id = {item["id"]: item for item in _connector_adapters()}
+
+    if preflight["schema_needed"]:
+        connectors.append({"id": "schema.inspect_file", "service": "schema", "status": "ready"})
+        steps.append({
+            "id": "step_1",
+            "name": "Inspect source schema",
+            "connector_id": "schema.inspect_file",
+            "purpose": "Read real columns and sample rows before planning field mappings.",
+            "input_contract": {"source": "uploaded_file_or_connected_sheet"},
+            "output_contract": {"columns": "string[]", "sample_rows": "object[]"},
+            "approval_required": False,
+        })
+
+    for detected in preflight["detected_services"]:
+        capability_id = _capability_for_service(detected["service"])
+        adapter = adapters_by_id.get(capability_id, {})
+        if not any(item["id"] == capability_id for item in connectors):
+            connectors.append({
+                "id": capability_id,
+                "service": detected["service"],
+                "status": "ready" if adapter.get("configured") else "needs_credentials",
+                "required_env": detected.get("required_env", []),
+            })
+        step_index = len(steps) + 1
+        approval_required = _approval_required_for_capability(capability_id)
+        steps.append({
+            "id": f"step_{step_index}",
+            "name": adapter.get("label") or detected["name"],
+            "connector_id": capability_id,
+            "purpose": f"Use {detected['name']} through its typed adapter.",
+            "input_contract": {"from": "previous_steps_or_user_input"},
+            "output_contract": {"result": "dry_run_preview_or_provider_response"},
+            "approval_required": approval_required,
+        })
+        if approval_required:
+            approval_gates.append({
+                "step_id": f"step_{step_index}",
+                "risk": adapter.get("risk", "external_write"),
+                "preview_required": True,
+            })
+
+    if not steps:
+        connectors.append({"id": "http.request", "service": "http", "status": "ready"})
+        steps.append({
+            "id": "step_1",
+            "name": "Prepare generic HTTP automation",
+            "connector_id": "http.request",
+            "purpose": "Represent the requested operation until a specific API or MCP tool is imported.",
+            "input_contract": {"request": "object"},
+            "output_contract": {"response": "object"},
+            "approval_required": False,
+        })
+
+    tests = [
+        {"id": "test_preflight_grounding", "asserts": "No invented systems or fields are required before schema discovery."},
+        {"id": "test_dry_run", "asserts": "Every external write step can produce a preview without credentials."},
+        {"id": "test_approval_gates", "asserts": "Risky writes are blocked behind approval previews."},
+    ]
+    status = "blocked" if preflight["questions"] else "ready_for_dry_run"
+    spec = {
+        "goal": prompt,
+        "trigger": {"type": "manual", "source": "user_prompt"},
+        "inputs": {
+            "schema_needed": preflight["schema_needed"],
+            "context": context or {},
+        },
+        "connectors": connectors,
+        "steps": steps,
+        "approval_gates": approval_gates,
+        "tests": tests,
+        "deployment": {"target": "local_docker", "runtime": "forgeflow_runtime", "requires_dispatch": True},
+        "questions": preflight["questions"],
+        "status": status,
+        "preflight": preflight,
+    }
+    return _store_automation_spec(spec)
+
+
+def _record_runtime_step(run_id: str, step: dict, status: str, output: dict | None = None, error: str | None = None) -> dict:
+    now = _now_iso()
+    item = {
+        "id": _stable_id("runtime_step", {"run_id": run_id, "step_id": step["id"]}),
+        "run_id": run_id,
+        "step_id": step["id"],
+        "connector_id": step["connector_id"],
+        "status": status,
+        "attempt": 1,
+        "input": step.get("input_contract", {}),
+        "output": output or {},
+        "error": error,
+        "started_at": now,
+        "completed_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO runtime_steps
+        (id, run_id, step_id, connector_id, status, attempt, input_json, output_json, error, started_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item["id"],
+            item["run_id"],
+            item["step_id"],
+            item["connector_id"],
+            item["status"],
+            item["attempt"],
+            json.dumps(item["input"]),
+            json.dumps(item["output"]),
+            item["error"],
+            item["started_at"],
+            item["completed_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return item
+
+
+def _list_runtime_runs(limit: int = 20) -> list[dict]:
+    conn = _platform_db()
+    run_rows = conn.execute("SELECT * FROM runtime_runs ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+    step_rows = conn.execute("SELECT * FROM runtime_steps ORDER BY started_at ASC").fetchall()
+    conn.close()
+    steps_by_run: dict[str, list[dict]] = {}
+    for row in step_rows:
+        steps_by_run.setdefault(row["run_id"], []).append({
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "step_id": row["step_id"],
+            "connector_id": row["connector_id"],
+            "status": row["status"],
+            "attempt": row["attempt"],
+            "input": _json_loads(row["input_json"], {}),
+            "output": _json_loads(row["output_json"], {}),
+            "error": row["error"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+        })
+    return [
+        {
+            "id": row["id"],
+            "spec_id": row["spec_id"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "input": _json_loads(row["input_json"], {}),
+            "output": _json_loads(row["output_json"], {}),
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "steps": steps_by_run.get(row["id"], []),
+        }
+        for row in run_rows
+    ]
+
+
+async def _dry_run_automation_spec(spec_id: str, inputs: dict | None = None) -> dict:
+    spec = _get_automation_spec(spec_id)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Automation spec not found")
+    run_id = _stable_id("runtime_run", {"spec_id": spec_id})
+    started = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO runtime_runs
+        (id, spec_id, status, mode, input_json, output_json, started_at, completed_at)
+        VALUES (?, ?, 'running', 'dry_run', ?, '{}', ?, NULL)
+        """,
+        (run_id, spec_id, json.dumps(inputs or {}), started),
+    )
+    conn.commit()
+    conn.close()
+
+    run_steps = []
+    blocked = False
+    adapters = {item["id"]: item for item in _connector_adapters()}
+    for step in spec["steps"]:
+        adapter = adapters.get(step["connector_id"], {})
+        if step.get("approval_required"):
+            status = "waiting_for_approval"
+            output = {"preview": f"{step['name']} is ready for approval preview.", "live_call_performed": False}
+        elif adapter.get("status") == "needs_credentials":
+            status = "blocked"
+            output = {"missing": "credentials", "live_call_performed": False}
+            blocked = True
+        else:
+            status = "succeeded"
+            output = {"preview": f"Dry-run completed through {step['connector_id']}.", "live_call_performed": False}
+        run_steps.append(_record_runtime_step(run_id, step, status, output))
+
+    final_status = "blocked" if blocked else ("waiting_for_approval" if any(item["status"] == "waiting_for_approval" for item in run_steps) else "succeeded")
+    output = {
+        "summary": f"{len(run_steps)} steps evaluated",
+        "approval_gates": len([item for item in run_steps if item["status"] == "waiting_for_approval"]),
+        "live_call_performed": False,
+    }
+    conn = _platform_db()
+    conn.execute(
+        "UPDATE runtime_runs SET status = ?, output_json = ?, completed_at = ? WHERE id = ?",
+        (final_status, json.dumps(output), _now_iso(), run_id),
+    )
+    conn.commit()
+    conn.close()
+    return _list_runtime_runs(limit=1)[0]
+
+
 def _extract_openapi_capabilities(spec: dict) -> list[dict]:
     title = spec.get("info", {}).get("title", "OpenAPI")
     capabilities_data = []
@@ -1557,6 +1942,9 @@ def _product_gap_analysis() -> dict:
     credentials = _list_credentials()
     eval_runs = _list_eval_runs()
     provider_health = _deployment_provider_health()
+    specs = _list_automation_specs(limit=20)
+    runtime_runs = _list_runtime_runs(limit=20)
+    adapters = _connector_adapters()
     pending_approvals = [item for item in _list_approvals() if item["status"] == "pending"]
     triggers = _list_triggers()
     runs = _collect_run_history(limit=20)
@@ -1613,6 +2001,24 @@ def _product_gap_analysis() -> dict:
             "status": "pass" if any(item["status"] == "pass" for item in provider_health) else "warn",
             "detail": f"{sum(1 for item in provider_health if item['status'] == 'pass')} provider targets ready",
         },
+        {
+            "id": "canonical_specs",
+            "label": "Canonical automation specs",
+            "status": "pass" if specs else "warn",
+            "detail": f"{len(specs)} prompt-to-spec compilations stored",
+        },
+        {
+            "id": "typed_adapters",
+            "label": "Typed connector adapters",
+            "status": "pass" if any(item["status"] == "ready" for item in adapters) else "warn",
+            "detail": f"{sum(1 for item in adapters if item['status'] == 'ready')} adapters ready",
+        },
+        {
+            "id": "runtime_ledger",
+            "label": "Runtime run ledger",
+            "status": "pass" if runtime_runs else "warn",
+            "detail": f"{len(runtime_runs)} structured runtime runs recorded",
+        },
     ]
     blockers = [item for item in checks if item["status"] != "pass"]
     return {
@@ -1620,9 +2026,9 @@ def _product_gap_analysis() -> dict:
         "checks": checks,
         "blockers": blockers,
         "next": [
-            "Complete OAuth token exchange and encrypted refresh-token storage.",
-            "Activate at least one real scheduled or webhook workflow.",
-            "Run prompt evals against real business fixtures before claiming broad automation coverage.",
+            "Connect canonical specs directly to generated code and deployment plans.",
+            "Promote dry-run ledger entries into live connector executions after approval.",
+            "Expand adapter contracts with rollback and compensation behavior.",
         ],
     }
 
@@ -1920,6 +2326,41 @@ async def product_gaps():
 async def capabilities():
     """List typed capabilities the planner should compose before custom code."""
     return {"capabilities": _all_capabilities()}
+
+
+@app.get("/api/connectors/adapters")
+async def connector_adapters():
+    """List typed connector adapter contracts available to compiled automation specs."""
+    return {"adapters": _connector_adapters()}
+
+
+@app.get("/api/specs")
+async def automation_specs():
+    """List canonical automation specs compiled from prompts."""
+    return {"specs": _list_automation_specs()}
+
+
+@app.post("/api/specs/compile")
+async def compile_automation_spec(body: dict):
+    """Compile a prompt into ForgeFlow's canonical automation spec before codegen."""
+    prompt = str(body.get("prompt", "")).strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    spec = await _compile_automation_spec(prompt, body.get("context", {}))
+    return {"spec": spec}
+
+
+@app.get("/api/runtime/runs")
+async def runtime_runs():
+    """Return structured runtime dry-run/live run ledger entries."""
+    return {"runs": _list_runtime_runs()}
+
+
+@app.post("/api/runtime/specs/{spec_id}/dry-run")
+async def dry_run_runtime_spec(spec_id: str, body: dict | None = None):
+    """Evaluate a canonical spec through adapter dry-run contracts without live external calls."""
+    body = body or {}
+    return {"run": await _dry_run_automation_spec(spec_id, body.get("inputs", {}))}
 
 
 @app.get("/api/templates")

@@ -789,3 +789,43 @@ def test_deployment_dispatch_records_provider_request(monkeypatch, tmp_path):
     assert jobs[0]["provider_request"]["provider"] == "render"
     assert jobs[0]["provider_request"]["operation"] == "create_or_update_worker_blueprint"
     assert jobs[0]["provider_response"]["live_call_performed"] is False
+
+
+@pytest.mark.asyncio
+async def test_compile_automation_spec_and_runtime_dry_run(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    spec = await main._compile_automation_spec(
+        "Automate HR onboarding from an Excel sheet, send Gmail, post Slack, and append Google Sheets row."
+    )
+    run = await main._dry_run_automation_spec(spec["id"], {"candidate": "Ada"})
+    specs = main._list_automation_specs()
+    runtime_runs = main._list_runtime_runs()
+
+    assert spec["id"] == specs[0]["id"]
+    assert spec["trigger"]["type"] == "manual"
+    assert {connector["id"] for connector in spec["connectors"]} >= {
+        "schema.inspect_file",
+        "gmail.send_email",
+        "slack.post_message",
+        "sheets.append_row",
+    }
+    assert any(step["approval_required"] for step in spec["steps"])
+    assert run["mode"] == "dry_run"
+    assert run["status"] in {"blocked", "waiting_for_approval", "succeeded"}
+    assert len(runtime_runs[0]["steps"]) == len(spec["steps"])
+    assert all(step["output"]["live_call_performed"] is False for step in runtime_runs[0]["steps"])
+
+
+def test_connector_adapters_report_contract_methods(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    adapters = main._connector_adapters()
+    slack = next(item for item in adapters if item["id"] == "slack.post_message")
+
+    assert {"auth_check", "dry_run", "execute", "compensate"} <= set(slack["methods"])
+    assert slack["risk"] == "external_write"
