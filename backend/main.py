@@ -27,6 +27,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from backend.connectors.catalog import BASE_CAPABILITIES, SERVICE_MARKERS, SERVICE_TO_DEFAULT_CAPABILITY, capability_specs
 from backend.shared.config import settings
 from backend.shared.models import ForgeRequest, ForgeResponse
 from backend.shared.security import require_admin_token
@@ -69,62 +70,7 @@ RUN_ENV_EXACT = {"TARGET_URL"}
 MAX_RUN_OUTPUT_CHARS = 12000
 PLATFORM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "forgeflow_platform.db")
 
-CAPABILITY_REGISTRY = [
-    {
-        "id": "schema.inspect_file",
-        "label": "Inspect Uploaded File",
-        "category": "Discovery",
-        "risk": "read_only",
-        "requires_auth": [],
-        "description": "Read CSV or XLSX headers and sample rows before planning.",
-        "dry_run": True,
-    },
-    {
-        "id": "slack.post_message",
-        "label": "Post Slack Message",
-        "category": "Messaging",
-        "risk": "external_write",
-        "requires_auth": ["SLACK_BOT_TOKEN"],
-        "description": "Send or draft Slack channel messages with approval gates.",
-        "dry_run": True,
-    },
-    {
-        "id": "gmail.send_email",
-        "label": "Send Gmail Email",
-        "category": "Messaging",
-        "risk": "external_write",
-        "requires_auth": ["GMAIL_ACCESS_TOKEN", "GMAIL_SENDER_EMAIL"],
-        "description": "Draft or send email messages through Gmail.",
-        "dry_run": True,
-    },
-    {
-        "id": "sheets.append_row",
-        "label": "Append Google Sheets Row",
-        "category": "Data",
-        "risk": "external_write",
-        "requires_auth": ["GOOGLE_SHEETS_ACCESS_TOKEN"],
-        "description": "Append validated rows to an existing spreadsheet.",
-        "dry_run": True,
-    },
-    {
-        "id": "http.request",
-        "label": "Call HTTP API",
-        "category": "API",
-        "risk": "network_call",
-        "requires_auth": [],
-        "description": "Call generic REST APIs from a validated request schema.",
-        "dry_run": True,
-    },
-    {
-        "id": "approval.wait",
-        "label": "Human Approval Gate",
-        "category": "Safety",
-        "risk": "approval_required",
-        "requires_auth": [],
-        "description": "Pause before sending, posting, writing, deleting, or changing access.",
-        "dry_run": True,
-    },
-]
+CAPABILITY_REGISTRY = BASE_CAPABILITIES
 
 TEMPLATE_GALLERY = [
     {
@@ -560,14 +506,20 @@ def _list_connector_states() -> list[dict]:
     for service, info in SUPPORTED_SERVICES.items():
         env = _env_status(info.get("env_vars", ()))
         connected = env["configured"] or service in vault_services
-        metadata = {"name": info["name"], "source": "environment"}
+        source = info.get("source", "environment")
+        metadata = {
+            "name": info["name"],
+            "source": source,
+            "docs_url": info.get("docs_url"),
+            "capability_count": len([item for item in CAPABILITY_REGISTRY if item.get("source") == service]),
+        }
         if service in vault_services:
             metadata["vault_credential"] = True
         status_by_service[service] = _upsert_connector_state(
             service=service,
             status="connected" if connected else "missing_credentials",
             auth_type=info.get("auth_type", "api_key"),
-            scopes=_oauth_specs().get(service, {}).get("scopes", []),
+            scopes=list(info.get("scopes", ())) or _oauth_specs().get(service, {}).get("scopes", []),
             env_vars=info.get("env_vars", ()),
             metadata=metadata,
         )
@@ -1164,19 +1116,16 @@ def _all_capabilities() -> list[dict]:
 def _connector_adapters() -> list[dict]:
     connectors = {item["service"]: item for item in _list_connector_states()}
     capability_by_id = {item["id"]: item for item in _all_capabilities()}
-    adapter_specs = [
-        ("schema.inspect_file", "schema", "Inspect uploaded file", "read_only", ["auth_check", "schema_discovery", "dry_run"]),
-        ("slack.post_message", "slack", "Post Slack message", "external_write", ["auth_check", "dry_run", "execute", "compensate"]),
-        ("gmail.send_email", "gmail", "Send Gmail email", "external_write", ["auth_check", "dry_run", "execute", "compensate"]),
-        ("sheets.append_row", "sheets", "Append Google Sheets row", "external_write", ["auth_check", "schema_discovery", "dry_run", "execute"]),
-        ("http.request", "http", "Call HTTP API", "network_call", ["auth_check", "schema_discovery", "dry_run", "execute"]),
-        ("approval.wait", "approval", "Human approval gate", "approval_required", ["dry_run", "execute"]),
-    ]
+    adapter_specs = capability_specs()
     adapters = []
     for capability_id, service, label, risk, methods in adapter_specs:
         capability = capability_by_id.get(capability_id, {})
         state = connectors.get(service, {})
-        configured = bool(state.get("env_status", {}).get("configured") or state.get("metadata", {}).get("vault_credential") or service in {"schema", "http", "approval"})
+        configured = bool(
+            state.get("env_status", {}).get("configured")
+            or state.get("metadata", {}).get("vault_credential")
+            or service in {"schema", "http", "approval"}
+        )
         adapters.append({
             "id": capability_id,
             "service": service,
@@ -1206,22 +1155,12 @@ def _connector_adapters() -> list[dict]:
 
 
 def _capability_for_service(service: str) -> str:
-    mapping = {
-        "slack": "slack.post_message",
-        "gmail": "gmail.send_email",
-        "sheets": "sheets.append_row",
-        "http": "http.request",
-    }
-    return mapping.get(service, "http.request")
+    return SERVICE_TO_DEFAULT_CAPABILITY.get(service, "http.request")
 
 
 def _approval_required_for_capability(capability_id: str) -> bool:
     capability = next((item for item in _all_capabilities() if item["id"] == capability_id), {})
-    return capability.get("risk") in {"external_write", "approval_required"} or capability_id in {
-        "slack.post_message",
-        "gmail.send_email",
-        "sheets.append_row",
-    }
+    return capability.get("risk") in {"external_write", "approval_required"}
 
 
 def _store_automation_spec(spec: dict) -> dict:
@@ -1508,14 +1447,11 @@ async def _dry_run_automation_spec(spec_id: str, inputs: dict | None = None) -> 
 def _business_conversation(prompt: str, context: dict | None = None) -> dict:
     prompt_lower = prompt.lower()
     known_systems = []
-    for service, markers in {
-        "Slack": ("slack", "channel"),
-        "Gmail": ("gmail", "email", "mail"),
-        "Google Sheets": ("sheet", "spreadsheet", "excel"),
-        "REST API": ("api", "webhook", "endpoint"),
-    }.items():
+    for service, markers in SERVICE_MARKERS.items():
         if any(marker in prompt_lower for marker in markers):
-            known_systems.append(service)
+            label = SUPPORTED_SERVICES.get(service, {}).get("name", service.title())
+            if label not in known_systems:
+                known_systems.append(label)
 
     process_steps = []
     if any(marker in prompt_lower for marker in ("hire", "employee", "onboard", "hr")):
@@ -1545,7 +1481,7 @@ def _business_conversation(prompt: str, context: dict | None = None) -> dict:
     questions = []
     if not known_systems:
         questions.append("Which business systems should this touch, for example HRIS, email, Slack, Sheets, CRM, or a custom API?")
-    if any(marker in prompt_lower for marker in ("sheet", "excel", "csv", "database", "hr", "crm")):
+    if any(marker in prompt_lower for marker in ("sheet", "excel", "csv", "database", "hr", "crm", "airtable", "notion")):
         questions.append("Can you upload or connect the source file/table so ForgeFlow can read the real columns?")
     if any(marker in prompt_lower for marker in ("send", "post", "create", "update", "delete", "invite", "provision")):
         questions.append("Should ForgeFlow keep every external action in preview mode until a human approves it?")
@@ -1690,7 +1626,7 @@ def _validate_connector_adapter(adapter_id: str) -> dict:
     if not adapter:
         raise HTTPException(status_code=404, detail="Connector adapter not found")
     service = adapter.get("service")
-    env_vars = list(SUPPORTED_SERVICES.get(service, {}).get("env_vars", ()))
+    env_vars = list(adapter.get("capability", {}).get("requires_auth", [])) or list(SUPPORTED_SERVICES.get(service, {}).get("env_vars", ()))
     if not env_vars and service in _oauth_specs():
         env_vars = list(_oauth_specs()[service].get("env_vars", []))
     env = _env_status(env_vars)
@@ -1701,7 +1637,7 @@ def _validate_connector_adapter(adapter_id: str) -> dict:
         {"id": "credentials", "label": "Credentials", "status": "pass" if adapter["configured"] or has_vault or env["configured"] else "warn", "detail": "Ready" if adapter["configured"] or has_vault or env["configured"] else f"Missing {', '.join(env['missing']) or 'stored credential'}"},
     ]
     alternatives = []
-    if service in {"gmail", "slack", "sheets"}:
+    if adapter.get("risk") == "external_write":
         alternatives.append({"id": "approval.wait", "label": "Create approval-only preview until credentials are connected"})
     if service != "http":
         alternatives.append({"id": "http.request", "label": "Use imported OpenAPI endpoint or generic HTTP request"})
@@ -2379,8 +2315,9 @@ def _product_gap_analysis() -> dict:
         "blockers": blockers,
         "next": [
             "Promote dry-run ledger entries into live connector executions after approval.",
-            "Expand adapter contracts with rollback and compensation behavior.",
+            "Import OpenAPI and MCP adapters into the connector catalog without code changes.",
             "Add marketplace-grade OAuth app setup for every production connector.",
+            "Persist sandbox auto-installed dependency reports with each generated workflow version.",
         ],
     }
 
@@ -2619,6 +2556,8 @@ async def provider_status():
             "name": info["name"],
             "configured": all(bool(os.getenv(env_name, "")) for env_name in required_env),
             "required_env": required_env,
+            "auth_type": info.get("auth_type", "api_key"),
+            "source": info.get("source", "catalog"),
         }
 
     return {
@@ -3258,10 +3197,9 @@ async def preflight_prompt(body: dict):
 
     prompt_lower = prompt.lower()
     service_markers = {
-        "slack": ("slack", "channel", "#"),
-        "gmail": ("gmail", "email", "mail", "inbox"),
-        "sheets": ("sheet", "spreadsheet", "google sheets", "row", "excel"),
-        "http": ("http", "api", "webhook", "url", "endpoint"),
+        service: markers
+        for service, markers in SERVICE_MARKERS.items()
+        if service not in {"schema", "approval"}
     }
 
     status = await provider_status()
@@ -3281,7 +3219,7 @@ async def preflight_prompt(body: dict):
                 if not service_status["configured"]:
                     missing_credentials.append(item)
 
-    schema_needed = any(marker in prompt_lower for marker in ("sheet", "spreadsheet", "excel", "csv", "database", "table", "hr", "crm"))
+    schema_needed = any(marker in prompt_lower for marker in ("sheet", "spreadsheet", "excel", "csv", "database", "table", "hr", "crm", "airtable", "notion"))
     external_write = any(marker in prompt_lower for marker in ("send", "post", "append", "write", "create", "update", "delete", "invite"))
     dry_run = any(marker in prompt_lower for marker in ("dry run", "dry-run", "draft", "do not send", "do not post", "do not write"))
 

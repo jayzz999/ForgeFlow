@@ -46,7 +46,7 @@ def test_ast_fallback_does_not_report_execution_success():
 
 
 def test_docker_sandbox_requirements_ignore_local_helper_modules():
-    from backend.execution.docker_sandbox import _extract_requirements_for_sandbox
+    from backend.execution.docker_sandbox import _extract_requirements_for_sandbox, _missing_module_from_stderr, _package_for_module
 
     requirements = _extract_requirements_for_sandbox(
         "from slack_client import send_message\n"
@@ -65,6 +65,8 @@ def test_docker_sandbox_requirements_ignore_local_helper_modules():
     assert "slack_client" not in requirements
     assert "order_api_client" not in requirements
     assert "sheets_client" not in requirements
+    assert _missing_module_from_stderr("ModuleNotFoundError: No module named 'humanize'") == "humanize"
+    assert _package_for_module("yaml") == "pyyaml>=6.0"
 
 
 def test_workflow_run_env_excludes_llm_keys(monkeypatch):

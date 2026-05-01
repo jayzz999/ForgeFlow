@@ -826,9 +826,17 @@ def test_connector_adapters_report_contract_methods(monkeypatch, tmp_path):
 
     adapters = main._connector_adapters()
     slack = next(item for item in adapters if item["id"] == "slack.post_message")
+    adapter_ids = {item["id"] for item in adapters}
 
     assert {"auth_check", "dry_run", "execute", "compensate"} <= set(slack["methods"])
     assert slack["risk"] == "external_write"
+    assert {
+        "hubspot.create_contact",
+        "stripe.create_refund",
+        "calendar.create_event",
+        "okta.assign_group",
+        "zendesk.create_ticket",
+    } <= adapter_ids
 
 
 def test_business_conversation_stays_non_technical():
@@ -836,10 +844,25 @@ def test_business_conversation_stays_non_technical():
 
     result = main._business_conversation("Automate employee onboarding from an Excel sheet and send Gmail.")
 
-    assert result["known_systems"] == ["Gmail", "Google Sheets"]
+    assert {"Gmail", "Google Sheets"} <= set(result["known_systems"])
     assert any("real schema" in item.lower() for item in result["process_steps"])
     assert any("upload or connect" in item.lower() for item in result["questions"])
     assert "No invented names, columns, or API fields." in result["non_technical_contract"]
+
+
+@pytest.mark.asyncio
+async def test_compile_spec_detects_catalog_connectors(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    spec = await main._compile_automation_spec(
+        "When a refund is approved, create a Stripe refund, open a Zendesk ticket, and schedule a Google Calendar follow-up."
+    )
+
+    connector_ids = {connector["id"] for connector in spec["connectors"]}
+    assert {"stripe.create_refund", "zendesk.create_ticket", "calendar.create_event"} <= connector_ids
+    assert any(gate["preview_required"] for gate in spec["approval_gates"])
 
 
 @pytest.mark.asyncio

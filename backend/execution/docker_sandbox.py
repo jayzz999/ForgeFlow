@@ -14,6 +14,7 @@ import asyncio
 import logging
 import tempfile
 import os
+import re
 
 logger = logging.getLogger("forgeflow.docker_sandbox")
 
@@ -39,6 +40,32 @@ _PIP_MAP = {
     "yaml": "pyyaml>=6.0",
 }
 
+_MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]")
+
+
+def _local_modules_from_extra_files(extra_files: dict[str, str] | None) -> set[str]:
+    local_modules: set[str] = set()
+    if not extra_files:
+        return local_modules
+    for path in extra_files:
+        normalized = path.replace("\\", "/").strip("/")
+        if normalized.endswith(".py"):
+            parts = normalized.split("/")
+            local_modules.add(parts[0].removesuffix(".py"))
+            local_modules.add(parts[-1].removesuffix(".py"))
+    return local_modules
+
+
+def _package_for_module(module: str) -> str:
+    return _PIP_MAP.get(module.split(".")[0], module.split(".")[0])
+
+
+def _missing_module_from_stderr(stderr: str) -> str | None:
+    match = _MISSING_MODULE_RE.search(stderr or "")
+    if not match:
+        return None
+    return match.group(1).split(".")[0]
+
 
 def _extract_requirements_for_sandbox(
     code: str,
@@ -50,15 +77,12 @@ def _extract_requirements_for_sandbox(
     ``slack_client.py``. Those are local modules, not pip packages, but their
     imports still need to be scanned for real dependencies.
     """
-    local_modules: set[str] = set()
+    local_modules: set[str] = _local_modules_from_extra_files(extra_files)
     combined_sources = [code]
     if extra_files:
         for path, content in extra_files.items():
             normalized = path.replace("\\", "/").strip("/")
             if normalized.endswith(".py"):
-                parts = normalized.split("/")
-                local_modules.add(parts[0].removesuffix(".py"))
-                local_modules.add(parts[-1].removesuffix(".py"))
                 combined_sources.append(content)
 
     imports: set[str] = set()
@@ -147,7 +171,7 @@ async def execute_code_docker(
     import uuid
 
     start = time.time()
-    container_name = f"{CONTAINER_PREFIX}{uuid.uuid4().hex[:8]}"
+    run_token = uuid.uuid4().hex[:8]
 
     # Write code to a temp directory
     with tempfile.TemporaryDirectory(prefix="forgeflow_") as tmpdir:
@@ -180,7 +204,7 @@ async def execute_code_docker(
         with open(setup_script, "w") as sf:
             sf.write(
                 "#!/bin/sh\n"
-                "pip install -q -r requirements.txt 2>/dev/null\n"
+                "python -m pip install -q --disable-pip-version-check --root-user-action=ignore -r requirements.txt\n"
                 "python workflow.py\n"
             )
         os.chmod(setup_script, 0o755)
@@ -195,79 +219,94 @@ async def execute_code_docker(
             if any(key.startswith(p) for p in env_prefixes):
                 env_args.extend(["-e", f"{key}={val}"])
 
-        # Build docker run command
-        cmd = [
-            "docker", "run",
-            "--rm",                          # Auto-remove after exit
-            "--name", container_name,
-            "--memory", "256m",              # Memory limit
-            "--cpus", "0.5",                 # CPU limit
-            "--tmpfs", "/tmp:size=64m",      # Writable /tmp
-            "-v", f"{tmpdir}:/app",          # Mount code (writable for pip)
-            "-w", "/app",
-        ]
-
-        # Pass env vars
-        cmd.extend(env_args)
-
-        if not network:
-            cmd.extend(["--network", "none"])
-
-        cmd.extend([
-            SANDBOX_IMAGE,
-            "sh", "run.sh",
-        ])
-
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            local_modules = _local_modules_from_extra_files(extra_files)
+            installed = set(req_content.splitlines())
+            auto_installed: list[str] = []
 
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout + 5  # 5s grace for Docker overhead
-                )
-            except asyncio.TimeoutError:
-                # Kill the container
-                kill_proc = await asyncio.create_subprocess_exec(
-                    "docker", "kill", container_name,
+            async def run_once(attempt: int):
+                container_name = f"{CONTAINER_PREFIX}{run_token}-{attempt}"
+                cmd = [
+                    "docker", "run",
+                    "--rm",                          # Auto-remove after exit
+                    "--name", container_name,
+                    "--memory", "256m",              # Memory limit
+                    "--cpus", "0.5",                 # CPU limit
+                    "--tmpfs", "/tmp:size=64m",      # Writable /tmp
+                    "-v", f"{tmpdir}:/app",          # Mount code (writable for pip)
+                    "-w", "/app",
+                ]
+                cmd.extend(env_args)
+                if not network:
+                    cmd.extend(["--network", "none"])
+                cmd.extend([SANDBOX_IMAGE, "sh", "run.sh"])
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await kill_proc.communicate()
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout + 5  # 5s grace for Docker overhead
+                    )
+                except asyncio.TimeoutError:
+                    kill_proc = await asyncio.create_subprocess_exec(
+                        "docker", "kill", container_name,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await kill_proc.communicate()
+                    return {
+                        "returncode": -1,
+                        "stdout": b"",
+                        "stderr": f"Execution timed out after {timeout}s (Docker sandbox)".encode(),
+                    }
+                return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr}
 
-                return {
+            last_stdout = ""
+            last_stderr = ""
+            for attempt in range(1, 4):
+                result = await run_once(attempt)
+                elapsed = time.time() - start
+                stdout_str = result["stdout"].decode("utf-8", errors="replace")[:5000]
+                stderr_str = result["stderr"].decode("utf-8", errors="replace")[:5000]
+                last_stdout = stdout_str
+                last_stderr = stderr_str
+
+                if result["returncode"] == 0:
+                    return {
+                        "success": True,
+                        "stdout": stdout_str,
+                        "stderr": stderr_str,
+                        "error": None,
+                        "execution_time": elapsed,
+                        "sandbox": "docker",
+                        "auto_installed": auto_installed,
+                    }
+
+                missing_module = _missing_module_from_stderr(stderr_str)
+                if not missing_module or missing_module in local_modules or missing_module in _STDLIB:
+                    break
+
+                requirement = _package_for_module(missing_module)
+                if requirement in installed:
+                    break
+
+                installed.add(requirement)
+                auto_installed.append(requirement)
+                with open(req_file, "a") as rf:
+                    rf.write(requirement + "\n")
+                logger.info("Auto-added sandbox dependency %s for missing module %s", requirement, missing_module)
+
+            return {
                     "success": False,
-                    "stdout": "",
-                    "stderr": "",
-                    "error": f"Execution timed out after {timeout}s (Docker sandbox)",
+                    "stdout": last_stdout,
+                    "stderr": last_stderr,
+                    "error": last_stderr or "Process exited with a non-zero code",
                     "execution_time": time.time() - start,
                     "sandbox": "docker",
-                }
-
-            elapsed = time.time() - start
-            stdout_str = stdout.decode("utf-8", errors="replace")[:5000]
-            stderr_str = stderr.decode("utf-8", errors="replace")[:5000]
-
-            if proc.returncode == 0:
-                return {
-                    "success": True,
-                    "stdout": stdout_str,
-                    "stderr": stderr_str,
-                    "error": None,
-                    "execution_time": elapsed,
-                    "sandbox": "docker",
-                }
-            else:
-                return {
-                    "success": False,
-                    "stdout": stdout_str,
-                    "stderr": stderr_str,
-                    "error": stderr_str or f"Process exited with code {proc.returncode}",
-                    "execution_time": elapsed,
-                    "sandbox": "docker",
+                    "auto_installed": auto_installed,
                 }
 
         except FileNotFoundError:

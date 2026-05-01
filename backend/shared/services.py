@@ -1,30 +1,18 @@
 """Single source of truth for ForgeFlow-supported integrations."""
 
+from backend.connectors.catalog import CONNECTOR_CATALOG
+
 SUPPORTED_SERVICES = {
-    "slack": {
-        "name": "Slack",
-        "aliases": ("slack",),
-        "docs_url": "https://api.slack.com/web",
-        "env_vars": ("SLACK_BOT_TOKEN",),
-    },
-    "gmail": {
-        "name": "Gmail",
-        "aliases": ("gmail", "smtp", "email"),
-        "docs_url": "https://support.google.com/mail/answer/185833",
-        "env_vars": ("GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"),
-    },
-    "sheets": {
-        "name": "Google Sheets",
-        "aliases": ("google sheets", "sheets", "spreadsheet"),
-        "docs_url": "https://developers.google.com/sheets/api/reference/rest",
-        "env_vars": ("GOOGLE_API_KEY", "GOOGLE_SHEET_ID"),
-    },
-    "http": {
-        "name": "HTTP/Webhooks",
-        "aliases": ("http", "webhook", "rest api", "url"),
-        "docs_url": "https://developer.mozilla.org/en-US/docs/Web/HTTP",
-        "env_vars": (),
-    },
+    service: {
+        "name": info["name"],
+        "aliases": info.get("aliases", (service,)),
+        "docs_url": info.get("docs_url", ""),
+        "env_vars": info.get("env_vars", ()),
+        "auth_type": info.get("auth_type", "api_key"),
+        "scopes": info.get("scopes", ()),
+        "source": info.get("source", "catalog"),
+    }
+    for service, info in CONNECTOR_CATALOG.items()
 }
 
 SUPPORTED_SERVICE_NAMES = tuple(info["name"] for info in SUPPORTED_SERVICES.values())
