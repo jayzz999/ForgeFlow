@@ -632,7 +632,7 @@ async def test_trigger_activation_and_inactive_webhook_event(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_active_webhook_records_failed_run_for_missing_workflow(monkeypatch, tmp_path):
+async def test_active_webhook_queues_missing_workflow(monkeypatch, tmp_path):
     from backend import main
 
     monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
@@ -645,13 +645,11 @@ async def test_active_webhook_records_failed_run_for_missing_workflow(monkeypatc
     await main.update_trigger_state(trigger["id"], "activate")
     result = await main.invoke_webhook_trigger(trigger["id"], {"event": "test"})
     events = await main.trigger_events()
-    run = await main.run_detail(result["run"]["run_id"])
 
     assert result["accepted"] is True
-    assert result["event"]["status"] == "failed"
-    assert result["run"]["success"] is False
-    assert events["events"][0]["run_id"] == result["run"]["run_id"]
-    assert run["stderr"] == "Workflow not found"
+    assert result["event"]["status"] == "queued"
+    assert result["queue"]["status"] == "queued"
+    assert events["events"][0]["run_id"] == result["queue"]["id"]
 
 
 def test_product_gap_analysis_reports_score(monkeypatch, tmp_path):
@@ -691,9 +689,10 @@ async def test_run_queue_records_failed_attempt_for_missing_workflow(monkeypatch
     queue = main._list_run_queue()
     run = await main.run_detail(processed["run"]["run_id"])
 
-    assert processed["queue_status"] == "failed"
-    assert queue[0]["status"] == "failed"
+    assert processed["queue_status"] == "dead_letter"
+    assert queue[0]["status"] == "dead_letter"
     assert queue[0]["last_error"] == "Workflow not found"
+    assert queue[0]["dead_letter_reason"] == "Workflow not found"
     assert run["stderr"] == "Workflow not found"
 
 

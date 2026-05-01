@@ -510,6 +510,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
   const [oauthError, setOauthError] = useState(null)
   const [callbackForm, setCallbackForm] = useState({ state: '', code: '', exchange: false })
   const [credentialForm, setCredentialForm] = useState({ service: 'slack', label: 'Local Slack token', kind: 'access_token', secret: '' })
+  const [rotationForm, setRotationForm] = useState({ credential_id: '', secret: '' })
 
   const startOAuth = async (service) => {
     setOauthError(null)
@@ -561,6 +562,24 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
     }
   }
 
+  const rotateCredential = async () => {
+    setOauthError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/vault/credentials/${rotationForm.credential_id}/rotate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: rotationForm.secret, metadata: { rotated_from_ui: true } }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setOauthResult({ service: payload.service, status: 'credential_rotated', scopes: [], auth_url: null })
+      setRotationForm({ credential_id: '', secret: '' })
+      onRefresh()
+    } catch (err) {
+      setOauthError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -583,7 +602,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
             <p className="mt-2 min-h-10 text-xs leading-5 text-forge-muted">
               Requires {service.required_env?.length ? service.required_env.join(', ') : 'no credentials'}
             </p>
-            {['gmail', 'sheets', 'slack'].includes(key) && (
+            {service.oauth_supported && (
               <button
                 onClick={() => startOAuth(key)}
                 className="mt-4 inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:border-sky-400/40 hover:text-sky-200"
@@ -674,6 +693,26 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
                   <p className="mt-2 text-xs text-forge-muted">{credential.service} · {credential.masked}</p>
                 </div>
               ))}
+            </div>
+          )}
+          <div className="mt-5 rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+            <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Rotate credential</h4>
+            <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+              <input value={rotationForm.credential_id} onChange={(event) => setRotationForm({ ...rotationForm, credential_id: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs outline-none focus:border-sky-400/50" placeholder="credential id" />
+              <input value={rotationForm.secret} onChange={(event) => setRotationForm({ ...rotationForm, secret: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs outline-none focus:border-sky-400/50" placeholder="new secret" type="password" />
+              <button onClick={rotateCredential} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Rotate</button>
+            </div>
+          </div>
+          {(connectorLifecycle?.credential_audit || []).length > 0 && (
+            <div className="mt-5">
+              <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Rotation audit</h4>
+              <div className="space-y-2">
+                {connectorLifecycle.credential_audit.slice(0, 6).map((item) => (
+                  <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3 text-xs text-forge-muted">
+                    {item.service} · {item.action} · {item.created_at}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -905,7 +944,7 @@ function ApprovalsView({ approvals, onRefresh }) {
   )
 }
 
-function RunsView({ runs, onRefresh }) {
+function RunsView({ runs, observability, onRefresh }) {
   const [selectedRun, setSelectedRun] = useState(null)
   const [queueForm, setQueueForm] = useState({ workflow_id: 'workflow-demo', priority: 5, max_attempts: 3 })
   const [queueError, setQueueError] = useState(null)
@@ -974,6 +1013,32 @@ function RunsView({ runs, onRefresh }) {
                     <button onClick={() => processQueue(item.id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Process</button>
                   </div>
                   {item.last_error && <p className="mt-2 text-xs text-amber-200">{item.last_error}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Reliability signals</h3>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <Metric label="Queued" value={observability?.queue?.queued ?? 0} Icon={TimerReset} tone="sky" />
+            <Metric label="Running" value={observability?.queue?.running ?? 0} Icon={Activity} tone="emerald" />
+            <Metric label="Dead letters" value={observability?.queue?.dead_letter ?? 0} Icon={Wrench} tone="amber" />
+          </div>
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Alerts and observability</h3>
+          {(observability?.events || []).length === 0 ? <EmptyState title="No events yet" body="Queue, trigger, runtime, deployment, and repair events are recorded here." /> : (
+            <div className="mt-4 max-h-72 space-y-2 overflow-auto">
+              {observability.events.slice(0, 10).map((event) => (
+                <div key={event.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">{event.subject}</div>
+                    <span className={`rounded-full px-2 py-1 text-[11px] ${event.severity === 'error' ? 'bg-red-400/10 text-red-300' : 'bg-sky-400/10 text-sky-200'}`}>{event.severity}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-forge-muted">{event.source} · {event.event_type} · {event.created_at}</div>
                 </div>
               ))}
             </div>
@@ -1509,6 +1574,28 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
     }
   }
 
+  const executeLiveSpec = async (specId) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runtime/specs/${specId}/execute-live`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved: true, inputs: { source: 'runtime-ui-approved' } }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setMessage(`Live execution ${payload.run.status}: ${payload.run.steps.length} step ledger entries`)
+      onRunsRefresh()
+      onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const exportSpec = async (specId, platform) => {
     setLoading(true)
     setError(null)
@@ -1622,6 +1709,11 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
             {latestSpec && (
               <button onClick={() => dryRunSpec(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
                 <Play size={16} /> Dry-run spec
+              </button>
+            )}
+            {latestSpec && (
+              <button onClick={() => executeLiveSpec(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-4 py-2 text-sm text-amber-200 hover:bg-amber-400/15 disabled:opacity-50">
+                <ShieldCheck size={16} /> Execute approved live
               </button>
             )}
             <button onClick={runHrDemo} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-400/15 disabled:opacity-50">
@@ -1949,10 +2041,17 @@ function AppWorkspace({ onLanding }) {
   const connectorAdapters = useApiResource('/api/connectors/adapters', { adapters: [] })
   const specs = useApiResource('/api/specs', { specs: [] })
   const runtimeRuns = useApiResource('/api/runtime/runs', { runs: [] })
+  const observability = useApiResource('/api/observability', { events: [], alerts: [], queue: {} })
   const gaps = useApiResource('/api/product/gaps', { score: 0, checks: [], blockers: [], next: [] })
   const evals = useApiResource('/api/evals/suites', { suites: [], runs: [] })
 
   const activeLabel = useMemo(() => NAV_ITEMS.find((item) => item.id === activeView)?.label || 'Workspace', [activeView])
+  const navigateView = useCallback((view) => {
+    setActiveView(view)
+    const url = new URL(window.location.href)
+    url.searchParams.set('view', view)
+    window.history.replaceState({}, '', url)
+  }, [])
 
   return (
     <div className="flex h-screen bg-forge-bg text-forge-text">
@@ -1964,7 +2063,7 @@ function AppWorkspace({ onLanding }) {
           {NAV_ITEMS.map(({ id, label, Icon }) => (
             <button
               key={id}
-              onClick={() => setActiveView(id)}
+              onClick={() => navigateView(id)}
               className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${
                 activeView === id ? 'bg-sky-400/15 text-sky-200' : 'text-forge-muted hover:bg-forge-border/60 hover:text-forge-text'
               }`}
@@ -1991,14 +2090,14 @@ function AppWorkspace({ onLanding }) {
               <span className={`h-2 w-2 rounded-full ${ws.connected ? 'bg-emerald-300' : 'bg-red-300'}`} />
               {ws.connected ? 'connected' : 'disconnected'}
             </span>
-            <button onClick={() => setActiveView('builder')} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+            <button onClick={() => navigateView('builder')} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
               <Play size={16} /> Build
             </button>
           </div>
         </header>
 
         <main className="min-h-0 flex-1 overflow-auto p-6">
-          {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={setActiveView} />}
+          {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={navigateView} />}
           {activeView === 'builder' && <BuilderView {...ws} />}
           {activeView === 'runtime' && <RuntimeView specs={specs.data} adapters={connectorAdapters.data} runtimeRuns={runtimeRuns.data} onSpecsRefresh={specs.refetch} onRunsRefresh={runtimeRuns.refetch} onGapsRefresh={gaps.refetch} />}
           {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} />}
@@ -2006,10 +2105,10 @@ function AppWorkspace({ onLanding }) {
           {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} onRefresh={approvals.refetch} />}
           {activeView === 'triggers' && <TriggersView triggers={triggers.data} onRefresh={triggers.refetch} />}
           {activeView === 'deployments' && <DeploymentsView targets={deploymentTargets.data} plans={deploymentPlans.data} onPlansRefresh={deploymentPlans.refetch} />}
-          {activeView === 'runs' && <RunsView runs={runs.data} onRefresh={runs.refetch} />}
+          {activeView === 'runs' && <RunsView runs={runs.data} observability={observability.data} onRefresh={() => { runs.refetch(); observability.refetch() }} />}
           {activeView === 'ingestions' && <IngestionsView ingestions={ingestions.data} onCapabilitiesRefresh={capabilities.refetch} onIngestionsRefresh={ingestions.refetch} />}
           {activeView === 'evals' && <EvalsView evals={evals.data} onRefresh={evals.refetch} />}
-          {activeView === 'templates' && <TemplatesView templates={templates.data} onNavigate={setActiveView} />}
+          {activeView === 'templates' && <TemplatesView templates={templates.data} onNavigate={navigateView} />}
           {activeView === 'roadmap' && <RoadmapView gaps={gaps.data} />}
         </main>
 

@@ -16,7 +16,7 @@ import io
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 logging.getLogger("slack").setLevel(logging.WARNING)
@@ -350,8 +350,35 @@ def _platform_db() -> sqlite3.Connection:
             cases_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS credential_audit (
+            id TEXT PRIMARY KEY,
+            credential_id TEXT NOT NULL,
+            service TEXT NOT NULL,
+            action TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS observability_events (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
+    for statement in (
+        "ALTER TABLE run_queue ADD COLUMN next_attempt_at TEXT",
+        "ALTER TABLE run_queue ADD COLUMN dead_letter_reason TEXT",
+    ):
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     return conn
 
@@ -422,7 +449,7 @@ def _mask_secret(value: str) -> str:
 
 
 def _oauth_specs() -> dict[str, dict]:
-    return {
+    specs = {
         "gmail": {
             "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
             "token_url": "https://oauth2.googleapis.com/token",
@@ -451,6 +478,37 @@ def _oauth_specs() -> dict[str, dict]:
             "env_vars": ["SLACK_BOT_TOKEN"],
         },
     }
+    generic_oauth = {
+        "salesforce": {
+            "auth_url": os.getenv("SALESFORCE_AUTH_URL", "https://login.salesforce.com/services/oauth2/authorize"),
+            "token_url": os.getenv("SALESFORCE_TOKEN_URL", "https://login.salesforce.com/services/oauth2/token"),
+            "client_id_env": "SALESFORCE_CLIENT_ID",
+            "client_secret_env": "SALESFORCE_CLIENT_SECRET",
+            "redirect_uri_env": "SALESFORCE_OAUTH_REDIRECT_URI",
+        },
+        "teams": {
+            "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            "client_id_env": "MICROSOFT_CLIENT_ID",
+            "client_secret_env": "MICROSOFT_CLIENT_SECRET",
+            "redirect_uri_env": "MICROSOFT_OAUTH_REDIRECT_URI",
+        },
+        "calendar": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "client_id_env": "GOOGLE_CLIENT_ID",
+            "client_secret_env": "GOOGLE_CLIENT_SECRET",
+            "redirect_uri_env": "GOOGLE_OAUTH_REDIRECT_URI",
+        },
+    }
+    for service, oauth in generic_oauth.items():
+        info = SUPPORTED_SERVICES.get(service, {})
+        specs[service] = {
+            **oauth,
+            "scopes": list(info.get("scopes", ())),
+            "env_vars": list(info.get("env_vars", ())),
+        }
+    return specs
 
 
 def _env_status(env_vars: list[str] | tuple[str, ...]) -> dict:
@@ -583,6 +641,7 @@ def _store_credential(service: str, label: str, kind: str, secret_value: str, me
     )
     conn.commit()
     conn.close()
+    _record_credential_audit(credential_id, service, "created", {"label": label, "kind": kind})
     return {
         "id": credential_id,
         "service": service,
@@ -592,6 +651,73 @@ def _store_credential(service: str, label: str, kind: str, secret_value: str, me
         "metadata": metadata or {},
         "created_at": now,
         "updated_at": now,
+    }
+
+
+def _record_credential_audit(credential_id: str, service: str, action: str, metadata: dict | None = None) -> dict:
+    record = {
+        "id": _stable_id("cred_audit", {"credential_id": credential_id, "action": action}),
+        "credential_id": credential_id,
+        "service": service,
+        "action": action,
+        "metadata": metadata or {},
+        "created_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO credential_audit
+        (id, credential_id, service, action, metadata_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (record["id"], credential_id, service, action, json.dumps(record["metadata"]), record["created_at"]),
+    )
+    conn.commit()
+    conn.close()
+    return record
+
+
+def _list_credential_audit(limit: int = 50) -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM credential_audit ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "credential_id": row["credential_id"],
+            "service": row["service"],
+            "action": row["action"],
+            "metadata": _json_loads(row["metadata_json"], {}),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def _rotate_credential(credential_id: str, secret_value: str, metadata: dict | None = None) -> dict:
+    if not secret_value:
+        raise HTTPException(status_code=400, detail="new secret is required")
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM credential_vault WHERE id = ?", (credential_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Credential not found")
+    merged_metadata = {**_json_loads(row["metadata_json"], {}), **(metadata or {}), "rotated_at": _now_iso()}
+    conn.execute(
+        "UPDATE credential_vault SET ciphertext = ?, metadata_json = ?, updated_at = ? WHERE id = ?",
+        (_encrypt_secret(secret_value), json.dumps(merged_metadata), _now_iso(), credential_id),
+    )
+    conn.commit()
+    conn.close()
+    _record_credential_audit(credential_id, row["service"], "rotated", {"label": row["label"], "kind": row["kind"]})
+    return {
+        "id": credential_id,
+        "service": row["service"],
+        "label": row["label"],
+        "kind": row["kind"],
+        "masked": _mask_secret(secret_value),
+        "metadata": merged_metadata,
+        "updated_at": _now_iso(),
     }
 
 
@@ -623,6 +749,26 @@ def _list_credentials() -> list[dict]:
 
 def _credential_services() -> set[str]:
     return {item["service"] for item in _list_credentials() if item.get("valid")}
+
+
+def _secret_for_service(service: str) -> str | None:
+    info = SUPPORTED_SERVICES.get(service, {})
+    secret_markers = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+    env_vars = list(info.get("env_vars", ()))
+    preferred_envs = [name for name in env_vars if any(marker in name.upper() for marker in secret_markers)]
+    for env_name in preferred_envs + [name for name in env_vars if name not in preferred_envs]:
+        value = os.getenv(env_name)
+        if value:
+            return value
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM credential_vault WHERE service = ? ORDER BY updated_at DESC", (service,)).fetchall()
+    conn.close()
+    for row in rows:
+        try:
+            return _decrypt_secret(row["ciphertext"])
+        except Exception:
+            continue
+    return None
 
 
 def _oauth_env_readiness(service: str) -> dict:
@@ -909,7 +1055,56 @@ def _record_run_log(workflow_id: str, result: dict, attempt: int = 1) -> dict:
     )
     conn.commit()
     conn.close()
+    _record_observability_event(
+        source="run_queue",
+        severity="info" if status == "success" else "error",
+        event_type="workflow_run_completed",
+        subject=workflow_id,
+        payload={"run_id": run_id, "attempt": attempt, "status": status, "stderr": result.get("stderr", "")[:500]},
+    )
     return {"run_id": run_id, "status": status}
+
+
+def _record_observability_event(source: str, severity: str, event_type: str, subject: str, payload: dict | None = None) -> dict:
+    event = {
+        "id": _stable_id("obs", {"source": source, "event_type": event_type, "subject": subject}),
+        "source": source,
+        "severity": severity,
+        "event_type": event_type,
+        "subject": subject,
+        "payload": payload or {},
+        "created_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO observability_events
+        (id, source, severity, event_type, subject, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (event["id"], source, severity, event_type, subject, json.dumps(event["payload"]), event["created_at"]),
+    )
+    conn.commit()
+    conn.close()
+    return event
+
+
+def _list_observability_events(limit: int = 100) -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM observability_events ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "source": row["source"],
+            "severity": row["severity"],
+            "event_type": row["event_type"],
+            "subject": row["subject"],
+            "payload": _json_loads(row["payload_json"], {}),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 def _get_run_log(run_id: str) -> dict | None:
@@ -1027,10 +1222,10 @@ def _enqueue_run(workflow_id: str, payload: dict | None = None, priority: int = 
     conn.execute(
         """
         INSERT INTO run_queue
-        (id, workflow_id, status, payload_json, priority, attempts, max_attempts, created_at, updated_at)
-        VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?)
+        (id, workflow_id, status, payload_json, priority, attempts, max_attempts, created_at, updated_at, next_attempt_at)
+        VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?)
         """,
-        (queue_id, workflow_id, json.dumps(payload or {}), priority, max_attempts, now, now),
+        (queue_id, workflow_id, json.dumps(payload or {}), priority, max_attempts, now, now, now),
     )
     conn.commit()
     conn.close()
@@ -1042,6 +1237,7 @@ def _enqueue_run(workflow_id: str, payload: dict | None = None, priority: int = 
         "priority": priority,
         "attempts": 0,
         "max_attempts": max_attempts,
+        "next_attempt_at": now,
         "created_at": now,
         "updated_at": now,
     }
@@ -1081,18 +1277,37 @@ async def _process_queue_item(queue_id: str) -> dict:
     except Exception as exc:
         result = {"success": False, "stdout": "", "stderr": str(exc), "execution_time": 0.0, "return_code": -1}
     run_meta = _record_run_log(row["workflow_id"], result, attempt=attempts)
-    final_status = "succeeded" if result.get("success") else ("failed" if attempts >= int(row["max_attempts"] or 3) else "queued")
+    max_attempts = int(row["max_attempts"] or 3)
+    final_status = "succeeded" if result.get("success") else ("dead_letter" if attempts >= max_attempts else "queued")
+    backoff_seconds = min(900, 2 ** max(attempts - 1, 0) * 30)
+    next_attempt_at = _now_iso() if final_status != "queued" else (datetime.utcnow().timestamp() + backoff_seconds)
+    next_attempt_value = _now_iso() if final_status != "queued" else datetime.utcfromtimestamp(next_attempt_at).isoformat() + "Z"
     conn = _platform_db()
     conn.execute(
         """
         UPDATE run_queue
-        SET status = ?, last_error = ?, run_id = ?, updated_at = ?
+        SET status = ?, last_error = ?, run_id = ?, updated_at = ?, next_attempt_at = ?, dead_letter_reason = ?
         WHERE id = ?
         """,
-        (final_status, None if result.get("success") else result.get("stderr", "failed"), run_meta["run_id"], _now_iso(), queue_id),
+        (
+            final_status,
+            None if result.get("success") else result.get("stderr", "failed"),
+            run_meta["run_id"],
+            _now_iso(),
+            next_attempt_value,
+            result.get("stderr", "max attempts reached") if final_status == "dead_letter" else None,
+            queue_id,
+        ),
     )
     conn.commit()
     conn.close()
+    _record_observability_event(
+        source="run_queue",
+        severity="error" if final_status == "dead_letter" else "info",
+        event_type="queue_item_processed",
+        subject=row["workflow_id"],
+        payload={"queue_id": queue_id, "status": final_status, "attempts": attempts, "max_attempts": max_attempts},
+    )
     return {"queue_id": queue_id, "queue_status": final_status, "run": {**result, **run_meta}}
 
 
@@ -1418,7 +1633,12 @@ async def _dry_run_automation_spec(spec_id: str, inputs: dict | None = None) -> 
         adapter = adapters.get(step["connector_id"], {})
         if step.get("approval_required"):
             status = "waiting_for_approval"
-            output = {"preview": f"{step['name']} is ready for approval preview.", "live_call_performed": False}
+            approval = _create_step_approval(spec, step)
+            output = {
+                "preview": f"{step['name']} is ready for approval preview.",
+                "approval_id": approval["id"],
+                "live_call_performed": False,
+            }
         elif adapter.get("status") == "needs_credentials":
             status = "blocked"
             output = {"missing": "credentials", "live_call_performed": False}
@@ -1441,6 +1661,293 @@ async def _dry_run_automation_spec(spec_id: str, inputs: dict | None = None) -> 
     )
     conn.commit()
     conn.close()
+    return _list_runtime_runs(limit=1)[0]
+
+
+def _create_step_approval(spec: dict, step: dict) -> dict:
+    preview = {
+        "spec_id": spec["id"],
+        "step_id": step["id"],
+        "connector_id": step["connector_id"],
+        "purpose": step.get("purpose"),
+        "input_contract": step.get("input_contract", {}),
+    }
+    approval_id = _stable_id("approval", preview)
+    now = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO approvals
+        (id, workflow_id, action_type, title, preview_json, risk, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            approval_id,
+            spec["id"],
+            step["connector_id"],
+            step["name"],
+            json.dumps(preview),
+            "external_write",
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": approval_id, "status": "pending", "preview": preview}
+
+
+def _has_approved_step(spec_id: str, step: dict) -> bool:
+    conn = _platform_db()
+    rows = conn.execute(
+        "SELECT preview_json FROM approvals WHERE workflow_id = ? AND action_type = ? AND status = 'approved'",
+        (spec_id, step["connector_id"]),
+    ).fetchall()
+    conn.close()
+    for row in rows:
+        preview = _json_loads(row["preview_json"], {})
+        if preview.get("step_id") == step["id"]:
+            return True
+    return False
+
+
+def _required_live_fields(connector_id: str) -> list[str]:
+    return {
+        "stripe.create_refund": ["charge_or_payment_intent"],
+        "zendesk.create_ticket": ["subject", "body"],
+        "calendar.create_event": ["summary", "start", "end"],
+        "hubspot.create_contact": ["email"],
+        "okta.assign_group": ["user_id", "group_id"],
+        "salesforce.create_record": ["object", "fields"],
+        "jira.create_issue": ["project_key", "summary"],
+        "notion.create_page": ["parent_id", "title"],
+        "airtable.create_record": ["table", "fields"],
+        "teams.post_message": ["channel_id", "text"],
+        "slack.post_message": ["channel", "text"],
+        "gmail.send_email": ["to", "subject", "body"],
+        "sheets.append_row": ["values"],
+        "http.request": ["url"],
+    }.get(connector_id, [])
+
+
+def _input_value(inputs: dict, *names: str):
+    for name in names:
+        value = inputs.get(name)
+        if value not in (None, "", []):
+            return value
+    return None
+
+
+def _missing_live_fields(connector_id: str, inputs: dict) -> list[str]:
+    aliases = {
+        "stripe.create_refund": {"charge_or_payment_intent": ("charge_or_payment_intent", "charge", "payment_intent")},
+        "zendesk.create_ticket": {"body": ("body", "description", "comment")},
+        "calendar.create_event": {"summary": ("summary", "subject", "title")},
+        "jira.create_issue": {"project_key": ("project_key", "project")},
+        "teams.post_message": {"text": ("text", "body", "message")},
+        "slack.post_message": {"text": ("text", "body", "message")},
+        "gmail.send_email": {"body": ("body", "message")},
+    }
+    missing = []
+    for field in _required_live_fields(connector_id):
+        names = aliases.get(connector_id, {}).get(field, (field,))
+        if _input_value(inputs, *names) in (None, "", []):
+            missing.append(field)
+    return missing
+
+
+def _json_request(method: str, url: str, headers: dict, body: dict | None = None) -> dict:
+    return {
+        "method": method,
+        "url": url,
+        "headers": {**headers, "Content-Type": "application/json"},
+        "body": json.dumps(body or {}).encode("utf-8") if body is not None else None,
+    }
+
+
+def _connector_live_request(connector_id: str, inputs: dict, secret: str | None) -> dict:
+    service = connector_id.split(".", 1)[0]
+    headers = {"Accept": "application/json"}
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    if connector_id == "stripe.create_refund":
+        return {
+            "method": "POST",
+            "url": "https://api.stripe.com/v1/refunds",
+            "headers": {**headers, "Content-Type": "application/x-www-form-urlencoded"},
+            "body": urlencode({
+                "charge": _input_value(inputs, "charge_or_payment_intent", "charge", "payment_intent"),
+                **({"amount": str(inputs["amount"])} if inputs.get("amount") else {}),
+            }).encode("utf-8"),
+        }
+    if connector_id == "zendesk.create_ticket":
+        subdomain = os.getenv("ZENDESK_SUBDOMAIN", "")
+        body = {"ticket": {"subject": inputs.get("subject"), "comment": {"body": _input_value(inputs, "body", "description", "comment")}}}
+        return _json_request("POST", f"https://{subdomain}.zendesk.com/api/v2/tickets.json", headers, body)
+    if connector_id == "calendar.create_event":
+        start = inputs.get("start")
+        end = inputs.get("end")
+        body = {
+            "summary": _input_value(inputs, "summary", "subject", "title"),
+            "start": start if isinstance(start, dict) else {"dateTime": start},
+            "end": end if isinstance(end, dict) else {"dateTime": end},
+        }
+        return _json_request("POST", "https://www.googleapis.com/calendar/v3/calendars/primary/events", headers, body)
+    if connector_id == "hubspot.create_contact":
+        body = {"properties": {"email": inputs.get("email"), **inputs.get("properties", {})}}
+        return _json_request("POST", "https://api.hubapi.com/crm/v3/objects/contacts", headers, body)
+    if connector_id == "hubspot.create_deal":
+        body = {"properties": {"dealname": inputs.get("dealname", inputs.get("name", "ForgeFlow deal")), **inputs.get("properties", {})}}
+        return _json_request("POST", "https://api.hubapi.com/crm/v3/objects/deals", headers, body)
+    if connector_id == "okta.assign_group":
+        org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
+        return {
+            "method": "PUT",
+            "url": f"{org_url}/api/v1/groups/{inputs.get('group_id')}/users/{inputs.get('user_id')}",
+            "headers": {"Accept": "application/json", "Authorization": f"SSWS {secret}"},
+            "body": None,
+        }
+    if connector_id == "okta.create_user":
+        org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
+        return _json_request("POST", f"{org_url}/api/v1/users?activate=false", {"Accept": "application/json", "Authorization": f"SSWS {secret}"}, inputs.get("profile", inputs))
+    if connector_id == "salesforce.create_record":
+        instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
+        object_name = inputs.get("object")
+        return _json_request("POST", f"{instance_url}/services/data/v60.0/sobjects/{object_name}/", headers, inputs.get("fields", {}))
+    if connector_id == "jira.create_issue":
+        base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
+        auth = base64.b64encode(f"{os.getenv('JIRA_EMAIL', '')}:{secret}".encode("utf-8")).decode("ascii")
+        jira_headers = {"Accept": "application/json", "Authorization": f"Basic {auth}"}
+        body = {"fields": {"project": {"key": _input_value(inputs, "project_key", "project")}, "summary": inputs.get("summary"), "issuetype": {"name": inputs.get("issue_type", "Task")}}}
+        if inputs.get("description"):
+            body["fields"]["description"] = inputs["description"]
+        return _json_request("POST", f"{base_url}/rest/api/3/issue", jira_headers, body)
+    if connector_id == "notion.create_page":
+        body = {"parent": {"page_id": inputs.get("parent_id")}, "properties": {"title": {"title": [{"text": {"content": inputs.get("title")}}]}}}
+        return _json_request("POST", "https://api.notion.com/v1/pages", {**headers, "Notion-Version": "2022-06-28"}, body)
+    if connector_id == "airtable.create_record":
+        base_id = os.getenv("AIRTABLE_BASE_ID", "")
+        body = {"fields": inputs.get("fields", {})}
+        return _json_request("POST", f"https://api.airtable.com/v0/{base_id}/{quote(str(inputs.get('table')))}", headers, body)
+    if connector_id == "teams.post_message":
+        body = {"body": {"contentType": "html", "content": _input_value(inputs, "text", "body", "message")}}
+        return _json_request("POST", f"https://graph.microsoft.com/v1.0/teams/{inputs.get('team_id')}/channels/{inputs.get('channel_id')}/messages", headers, body)
+    if connector_id == "slack.post_message":
+        body = {"channel": inputs.get("channel"), "text": _input_value(inputs, "text", "body", "message")}
+        return _json_request("POST", "https://slack.com/api/chat.postMessage", headers, body)
+    if connector_id == "gmail.send_email":
+        raw = base64.urlsafe_b64encode(
+            f"To: {inputs.get('to')}\r\nSubject: {inputs.get('subject')}\r\n\r\n{_input_value(inputs, 'body', 'message')}".encode("utf-8")
+        ).decode("ascii")
+        return _json_request("POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", headers, {"raw": raw})
+    if connector_id == "sheets.append_row":
+        sheet_id = os.getenv("GOOGLE_SHEET_ID", inputs.get("sheet_id", ""))
+        range_name = quote(str(inputs.get("range", "Sheet1!A1")), safe="")
+        body = {"values": inputs.get("values", [])}
+        return _json_request("POST", f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}:append?valueInputOption=USER_ENTERED", headers, body)
+    if connector_id == "http.request":
+        return {
+            "method": inputs.get("method", "GET"),
+            "url": inputs["url"],
+            "headers": {**headers, **inputs.get("headers", {})},
+            "body": json.dumps(inputs.get("body", {})).encode("utf-8") if inputs.get("body") else None,
+        }
+    return {
+        "method": "POST",
+        "url": inputs.get("url", f"connector://{service}/{connector_id}"),
+        "headers": headers,
+        "body": json.dumps(inputs.get("body", inputs)).encode("utf-8"),
+    }
+
+
+def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_override: bool = False) -> tuple[str, dict, str | None]:
+    connector_id = step["connector_id"]
+    service = connector_id.split(".", 1)[0]
+    if step.get("approval_required") and not (approved_override or _has_approved_step(spec["id"], step)):
+        return "waiting_for_approval", {"live_call_performed": False, "approval_required": True}, None
+
+    required = _required_live_fields(connector_id)
+    missing_fields = _missing_live_fields(connector_id, inputs)
+    if missing_fields:
+        return "blocked", {"live_call_performed": False, "missing_fields": missing_fields}, None
+
+    secret = _secret_for_service(service)
+    if service not in {"http", "schema", "approval"} and not secret:
+        return "blocked", {"live_call_performed": False, "missing": "credentials"}, None
+
+    request_spec = _connector_live_request(connector_id, inputs, secret)
+    if request_spec["url"].startswith("connector://"):
+        return "blocked", {
+            "live_call_performed": False,
+            "missing": "provider_endpoint",
+            "request": {k: v for k, v in request_spec.items() if k != "body"},
+        }, None
+
+    try:
+        req = Request(
+            request_spec["url"],
+            data=request_spec.get("body"),
+            headers=request_spec.get("headers", {}),
+            method=request_spec.get("method", "POST"),
+        )
+        with urlopen(req, timeout=20) as response:
+            text = response.read().decode("utf-8", errors="replace")[:4000]
+            return "succeeded", {
+                "live_call_performed": True,
+                "status_code": response.status,
+                "response": _json_loads(text, {"text": text}),
+                "compensation": _compensation_for_step(connector_id, inputs),
+            }, None
+    except Exception as exc:
+        return "failed", {"live_call_performed": True, "request_url": request_spec["url"]}, str(exc)
+
+
+def _compensation_for_step(connector_id: str, inputs: dict) -> dict:
+    if connector_id == "stripe.create_refund":
+        return {"type": "manual_review", "reason": "Stripe refunds generally cannot be undone after creation."}
+    if connector_id.endswith("create_ticket"):
+        return {"type": "close_record", "target": "created ticket"}
+    if connector_id.endswith("create_event"):
+        return {"type": "delete_event", "target": "created event"}
+    if connector_id.endswith("create_contact") or connector_id.endswith("create_record"):
+        return {"type": "delete_created_record", "target": "provider object id from response"}
+    return {"type": "provider_specific_compensation", "available": False}
+
+
+async def _live_run_automation_spec(spec_id: str, inputs: dict | None = None, approved: bool = False) -> dict:
+    spec = _get_automation_spec(spec_id)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Automation spec not found")
+    run_id = _stable_id("runtime_live", {"spec_id": spec_id})
+    started = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO runtime_runs
+        (id, spec_id, status, mode, input_json, output_json, started_at, completed_at)
+        VALUES (?, ?, 'running', 'live', ?, '{}', ?, NULL)
+        """,
+        (run_id, spec_id, json.dumps(inputs or {}), started),
+    )
+    conn.commit()
+    conn.close()
+    failed = False
+    blocked = False
+    for step in spec["steps"]:
+        status, output, error = _execute_live_connector_step(spec, step, inputs or {}, approved_override=approved)
+        failed = failed or status == "failed"
+        blocked = blocked or status in {"blocked", "waiting_for_approval"}
+        _record_runtime_step(run_id, step, status, output, error)
+    final_status = "failed" if failed else ("blocked" if blocked else "succeeded")
+    output = {"summary": f"{len(spec['steps'])} live steps evaluated", "approved_override": approved}
+    conn = _platform_db()
+    conn.execute(
+        "UPDATE runtime_runs SET status = ?, output_json = ?, completed_at = ? WHERE id = ?",
+        (final_status, json.dumps(output), _now_iso(), run_id),
+    )
+    conn.commit()
+    conn.close()
+    _record_observability_event("runtime", "error" if failed else "info", "live_spec_run", spec_id, output | {"status": final_status})
     return _list_runtime_runs(limit=1)[0]
 
 
@@ -2227,6 +2734,8 @@ def _product_gap_analysis() -> dict:
     ingested_count = len(_all_capabilities()) - len(CAPABILITY_REGISTRY)
     active_triggers = [item for item in triggers if item["status"] == "active"]
     failed_runs = [item for item in runs if not item["success"]]
+    live_runs = [item for item in runtime_runs if item["mode"] == "live"]
+    observability_events = _list_observability_events(limit=20)
 
     checks = [
         {
@@ -2296,6 +2805,12 @@ def _product_gap_analysis() -> dict:
             "detail": f"{len(runtime_runs)} structured runtime runs recorded",
         },
         {
+            "id": "approved_live_execution",
+            "label": "Approved live execution",
+            "status": "pass" if live_runs else "warn",
+            "detail": f"{len(live_runs)} live runtime executions recorded",
+        },
+        {
             "id": "multi_platform_exports",
             "label": "Multi-platform workflow exports",
             "status": "pass" if exports else "warn",
@@ -2307,6 +2822,12 @@ def _product_gap_analysis() -> dict:
             "status": "pass" if any(run["status"] in {"blocked", "waiting_for_approval"} for run in runtime_runs) else "warn",
             "detail": "Runtime failures can be converted into credential, approval, or debug actions",
         },
+        {
+            "id": "observability_events",
+            "label": "Observability and alerts",
+            "status": "pass" if observability_events else "warn",
+            "detail": f"{len(observability_events)} operational events recorded",
+        },
     ]
     blockers = [item for item in checks if item["status"] != "pass"]
     return {
@@ -2314,10 +2835,9 @@ def _product_gap_analysis() -> dict:
         "checks": checks,
         "blockers": blockers,
         "next": [
-            "Promote dry-run ledger entries into live connector executions after approval.",
-            "Import OpenAPI and MCP adapters into the connector catalog without code changes.",
-            "Add marketplace-grade OAuth app setup for every production connector.",
-            "Persist sandbox auto-installed dependency reports with each generated workflow version.",
+            "Replace generic provider envelopes with official SDK clients for every high-volume connector.",
+            "Add hosted worker credentials for GitHub, Render, and webhook runtime promotions.",
+            "Run a full live connector execution with real credentials in a staging account.",
         ],
     }
 
@@ -2558,6 +3078,7 @@ async def provider_status():
             "required_env": required_env,
             "auth_type": info.get("auth_type", "api_key"),
             "source": info.get("source", "catalog"),
+            "oauth_supported": key in _oauth_specs(),
         }
 
     return {
@@ -2682,10 +3203,34 @@ async def dry_run_runtime_spec(spec_id: str, body: dict | None = None):
     return {"run": await _dry_run_automation_spec(spec_id, body.get("inputs", {}))}
 
 
+@app.post("/api/runtime/specs/{spec_id}/execute-live")
+async def execute_live_runtime_spec(spec_id: str, body: dict | None = None):
+    """Execute approved live connector steps. Missing approvals, credentials, or inputs block safely."""
+    body = body or {}
+    if not body.get("approved"):
+        raise HTTPException(status_code=403, detail="approved=true is required for live connector execution")
+    return {"run": await _live_run_automation_spec(spec_id, body.get("inputs", {}), approved=True)}
+
+
 @app.post("/api/runtime/runs/{run_id}/repair")
 async def repair_runtime_run(run_id: str):
     """Convert a blocked or failed runtime run into concrete repair actions."""
     return {"repair": _repair_runtime_run(run_id)}
+
+
+@app.get("/api/observability")
+async def observability():
+    queue = _list_run_queue()
+    events = _list_observability_events()
+    return {
+        "events": events,
+        "alerts": [event for event in events if event["severity"] in {"error", "critical"}],
+        "queue": {
+            "queued": sum(1 for item in queue if item["status"] == "queued"),
+            "dead_letter": sum(1 for item in queue if item["status"] == "dead_letter"),
+            "running": sum(1 for item in queue if item["status"] == "running"),
+        },
+    }
 
 
 @app.post("/api/demo/hr-onboarding")
@@ -2844,6 +3389,8 @@ async def create_trigger(body: dict):
 
 @app.post("/api/triggers/{trigger_id}/{action}")
 async def update_trigger_state(trigger_id: str, action: str):
+    if trigger_id == "schedules" and action == "process":
+        return await _process_due_schedules()
     if action not in {"activate", "pause"}:
         raise HTTPException(status_code=400, detail="Action must be activate or pause")
     status = "active" if action == "activate" else "paused"
@@ -2867,35 +3414,46 @@ async def invoke_webhook_trigger(trigger_id: str, body: dict):
     if trigger["status"] != "active":
         event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "ignored_inactive")
         return {"accepted": False, "event": event, "message": "Trigger is paused"}
-    event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "running")
-    try:
-        result = await _execute_workflow_project(trigger["workflow_id"])
-        run_meta = _record_run_log(trigger["workflow_id"], result)
-        status = "success" if result.get("success") else "failed"
-        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, status, run_meta["run_id"])
-        return {"accepted": True, "event": event, "run": {**result, **run_meta}}
-    except HTTPException as exc:
-        result = {
-            "success": False,
-            "stdout": "",
-            "stderr": exc.detail,
-            "execution_time": 0.0,
-            "return_code": -1,
-        }
-        run_meta = _record_run_log(trigger["workflow_id"], result)
-        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "failed", run_meta["run_id"])
-        return {"accepted": True, "event": event, "run": {**result, **run_meta}}
-    except Exception as exc:
-        result = {
-            "success": False,
-            "stdout": "",
-            "stderr": str(exc),
-            "execution_time": 0.0,
-            "return_code": -1,
-        }
-        run_meta = _record_run_log(trigger["workflow_id"], result)
-        event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "failed", run_meta["run_id"])
-        return {"accepted": True, "event": event, "run": {**result, **run_meta}}
+    queue_item = _enqueue_run(
+        trigger["workflow_id"],
+        {"trigger_id": trigger_id, "event_type": "webhook", "payload": body},
+        priority=int(trigger["config"].get("priority", 5)),
+        max_attempts=int(trigger["config"].get("max_attempts", 3)),
+    )
+    event = _record_trigger_event(trigger_id, trigger["workflow_id"], "webhook", body, "queued", queue_item["id"])
+    _record_observability_event("trigger", "info", "webhook_queued", trigger["workflow_id"], {"trigger_id": trigger_id, "queue_id": queue_item["id"]})
+    if trigger["config"].get("process_immediately"):
+        processed = await _process_queue_item(queue_item["id"])
+        return {"accepted": True, "event": event, "queue": queue_item, "processed": processed}
+    return {"accepted": True, "event": event, "queue": queue_item}
+
+
+async def _process_due_schedules():
+    """Queue due schedule triggers using simple interval_seconds config."""
+    queued = []
+    now_ts = datetime.utcnow().timestamp()
+    for trigger in _list_triggers():
+        if trigger["status"] != "active" or trigger["trigger_type"] != "schedule":
+            continue
+        config = trigger.get("config", {})
+        interval = int(config.get("interval_seconds", 3600))
+        last_run = float(config.get("last_run_ts", 0))
+        if now_ts - last_run < interval:
+            continue
+        queue_item = _enqueue_run(trigger["workflow_id"], {"trigger_id": trigger["id"], "event_type": "schedule"}, max_attempts=int(config.get("max_attempts", 3)))
+        config["last_run_ts"] = now_ts
+        conn = _platform_db()
+        conn.execute("UPDATE triggers SET config_json = ?, updated_at = ? WHERE id = ?", (json.dumps(config), _now_iso(), trigger["id"]))
+        conn.commit()
+        conn.close()
+        queued.append(queue_item)
+        _record_trigger_event(trigger["id"], trigger["workflow_id"], "schedule", config, "queued", queue_item["id"])
+    return {"queued": queued}
+
+
+@app.post("/api/triggers/schedules/process")
+async def process_due_schedules():
+    return await _process_due_schedules()
 
 
 @app.get("/api/triggers/events")
@@ -2992,6 +3550,25 @@ async def dispatch_deployment_plan(plan_id: str, body: dict | None = None):
     return {"id": plan_id, "job": job}
 
 
+@app.post("/api/deploy/plans/{plan_id}/complete")
+async def complete_deployment_job(plan_id: str, body: dict):
+    """Record an externally completed provider deployment without storing secrets."""
+    status = str(body.get("status", "deployed")).strip()
+    provider_url = str(body.get("provider_url", "")).strip()
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM deployment_plans WHERE id = ?", (plan_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Deployment plan not found")
+    plan = _json_loads(row["plan_json"], {})
+    conn.execute("UPDATE deployment_plans SET status = ? WHERE id = ?", (status, plan_id))
+    conn.commit()
+    conn.close()
+    activation = _record_deployment_activation(plan_id, {**plan, "provider_url": provider_url}, status)
+    _record_observability_event("deployment", "info", "deployment_completed", plan.get("workflow_id", plan_id), {"plan_id": plan_id, "provider_url": provider_url, "status": status})
+    return {"id": plan_id, "status": status, "provider_url": provider_url, "activation": activation}
+
+
 @app.get("/api/deploy/jobs")
 async def deployment_jobs():
     return {"jobs": _list_deployment_jobs()}
@@ -3029,6 +3606,20 @@ async def ingest_openapi(body: dict):
     return _store_ingestion("openapi", name, summary, capabilities_data)
 
 
+@app.post("/api/openapi/upload")
+async def upload_openapi(file: UploadFile = File(...)):
+    content = (await file.read()).decode("utf-8", errors="replace")
+    try:
+        body = json.loads(content)
+    except json.JSONDecodeError:
+        try:
+            import yaml
+            body = yaml.safe_load(content)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Upload JSON or YAML OpenAPI content: {exc}")
+    return await ingest_openapi(body)
+
+
 @app.post("/api/mcp/ingest")
 async def ingest_mcp(body: dict):
     capabilities_data = _extract_mcp_capabilities(body)
@@ -3040,6 +3631,15 @@ async def ingest_mcp(body: dict):
         "tool_count": len(capabilities_data),
     }
     return _store_ingestion("mcp", name, summary, capabilities_data)
+
+
+@app.post("/api/mcp/discover")
+async def discover_mcp_adapter(body: dict):
+    """Accept a discovered MCP server manifest and ingest its tools as capabilities."""
+    server_url = str(body.get("server_url", "")).strip()
+    manifest = body.get("manifest") or body
+    ingestion = await ingest_mcp(manifest)
+    return {"server_url": server_url, "ingestion": ingestion, "dynamic_capabilities": ingestion["capabilities"]}
 
 
 @app.get("/api/connectors/oauth/{service}/start")
@@ -3097,6 +3697,7 @@ async def connector_lifecycle():
         "connectors": _list_connector_states(),
         "oauth_sessions": _list_oauth_sessions(),
         "credentials": _list_credentials(),
+        "credential_audit": _list_credential_audit(),
     }
 
 
@@ -3116,6 +3717,20 @@ async def store_vault_credential(body: dict):
         scopes=_oauth_specs().get(service, {}).get("scopes", []),
         env_vars=[],
         metadata={"credential_id": credential["id"], "label": label},
+    )
+    return credential
+
+
+@app.post("/api/vault/credentials/{credential_id}/rotate")
+async def rotate_vault_credential(credential_id: str, body: dict):
+    credential = _rotate_credential(credential_id, str(body.get("secret", "")).strip(), body.get("metadata", {}))
+    _upsert_connector_state(
+        service=credential["service"],
+        status="vault_credential_rotated",
+        auth_type="oauth2" if "token" in credential["kind"] else "api_key",
+        scopes=_oauth_specs().get(credential["service"], {}).get("scopes", []),
+        env_vars=[],
+        metadata={"credential_id": credential["id"], "label": credential["label"], "rotated_at": credential["updated_at"]},
     )
     return credential
 
