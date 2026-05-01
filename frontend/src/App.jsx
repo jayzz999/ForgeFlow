@@ -511,6 +511,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
   const [callbackForm, setCallbackForm] = useState({ state: '', code: '', exchange: false })
   const [credentialForm, setCredentialForm] = useState({ service: 'slack', label: 'Local Slack token', kind: 'access_token', secret: '' })
   const [rotationForm, setRotationForm] = useState({ credential_id: '', secret: '' })
+  const [testingService, setTestingService] = useState(null)
 
   const startOAuth = async (service) => {
     setOauthError(null)
@@ -580,6 +581,27 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
     }
   }
 
+  const testConnector = async (service, live = false) => {
+    if (live && !window.confirm(`Run a read-only live probe for ${service}? This sends the stored credential to the provider to verify access.`)) return
+    setOauthError(null)
+    setTestingService(service)
+    try {
+      const res = await fetch(`${API_URL}/api/connectors/${service}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ live }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setOauthResult({ service, status: payload.test.status, scopes: [], auth_url: null, test: payload.test })
+      onRefresh()
+    } catch (err) {
+      setOauthError(err.message)
+    } finally {
+      setTestingService(null)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -610,6 +632,16 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
                 <KeyRound size={14} /> Start OAuth
               </button>
             )}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button onClick={() => testConnector(key, false)} disabled={testingService === key} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:border-sky-400/40 hover:text-sky-200 disabled:opacity-50">
+                <ShieldCheck size={14} /> Dry check
+              </button>
+              {!['schema', 'approval'].includes(key) && (
+                <button onClick={() => testConnector(key, true)} disabled={testingService === key} className="inline-flex items-center gap-2 rounded-lg border border-amber-400/30 px-3 py-2 text-xs text-amber-200 hover:bg-amber-400/10 disabled:opacity-50">
+                  <Activity size={14} /> Live probe
+                </button>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -625,6 +657,11 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
               {oauthResult.token_exchange?.stored_credentials?.length ? (
                 <div className="text-xs text-emerald-200">Stored tokens: {oauthResult.token_exchange.stored_credentials.map((item) => item.kind).join(', ')}</div>
               ) : null}
+              {oauthResult.test && (
+                <div className="rounded-lg border border-forge-border bg-forge-bg/60 p-3 text-xs text-forge-muted">
+                  Test mode: {oauthResult.test.mode} · {oauthResult.test.error || oauthResult.test.response?.message || 'completed'}
+                </div>
+              )}
               <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
                 <input value={callbackForm.state} onChange={(event) => setCallbackForm({ ...callbackForm, state: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none" placeholder="state" />
                 <input value={callbackForm.code} onChange={(event) => setCallbackForm({ ...callbackForm, code: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none" placeholder="provider auth code" />
@@ -660,6 +697,22 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
               {connectorLifecycle.oauth_sessions.map((session) => (
                 <div key={session.state} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3 text-xs text-forge-muted">
                   {session.service} · {session.status} · {session.state}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {(connectorLifecycle?.connector_tests || []).length > 0 && (
+          <div className="mt-5">
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Recent connector tests</h4>
+            <div className="grid gap-2 md:grid-cols-2">
+              {connectorLifecycle.connector_tests.slice(0, 8).map((test) => (
+                <div key={test.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3 text-xs text-forge-muted">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{test.service} · {test.mode}</span>
+                    <span className={`rounded-full px-2 py-1 text-[10px] ${test.status === 'failed' ? 'bg-red-400/10 text-red-300' : test.status === 'connected' || test.status === 'ready' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{test.status}</span>
+                  </div>
+                  <div className="mt-1 truncate">{test.error || test.response?.message || test.created_at}</div>
                 </div>
               ))}
             </div>
@@ -948,7 +1001,22 @@ function RunsView({ runs, observability, onRefresh }) {
   const [selectedRun, setSelectedRun] = useState(null)
   const [queueForm, setQueueForm] = useState({ workflow_id: 'workflow-demo', priority: 5, max_attempts: 3 })
   const [queueError, setQueueError] = useState(null)
+  const [workerStatus, setWorkerStatus] = useState(null)
   const queue = runs?.queue || []
+
+  const loadWorkerStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/runs/queue/worker`)
+      const payload = await res.json()
+      if (res.ok) setWorkerStatus(payload)
+    } catch {
+      setWorkerStatus(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadWorkerStatus()
+  }, [loadWorkerStatus])
 
   const enqueue = async () => {
     setQueueError(null)
@@ -978,6 +1046,23 @@ function RunsView({ runs, observability, onRefresh }) {
     }
   }
 
+  const processDueQueue = async () => {
+    setQueueError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runs/queue/process-due`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 5 }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+      loadWorkerStatus()
+    } catch (err) {
+      setQueueError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -1002,7 +1087,15 @@ function RunsView({ runs, observability, onRefresh }) {
           </div>
         </div>
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Durable queue</h3>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Durable queue</h3>
+              <p className="mt-1 text-xs text-forge-muted">
+                Worker {workerStatus?.enabled ? 'enabled' : 'manual'} · {workerStatus?.due?.length ?? 0} due now
+              </p>
+            </div>
+            <button onClick={processDueQueue} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Process due</button>
+          </div>
           {queue.length === 0 ? <EmptyState title="Queue empty" body="Queued workflow runs will retry and keep failure reasons." /> : (
             <div className="mt-4 space-y-2">
               {queue.map((item) => (
@@ -1024,7 +1117,7 @@ function RunsView({ runs, observability, onRefresh }) {
           <h3 className="text-sm font-semibold">Reliability signals</h3>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             <Metric label="Queued" value={observability?.queue?.queued ?? 0} Icon={TimerReset} tone="sky" />
-            <Metric label="Running" value={observability?.queue?.running ?? 0} Icon={Activity} tone="emerald" />
+            <Metric label="Running" value={observability?.queue?.running ?? 0} Icon={Activity} tone="green" />
             <Metric label="Dead letters" value={observability?.queue?.dead_letter ?? 0} Icon={Wrench} tone="amber" />
           </div>
         </div>

@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 from urllib.parse import quote, urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 logging.getLogger("slack").setLevel(logging.WARNING)
@@ -233,6 +234,17 @@ def _platform_db() -> sqlite3.Connection:
             status TEXT NOT NULL,
             checks_json TEXT NOT NULL,
             alternatives_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS connector_tests (
+            id TEXT PRIMARY KEY,
+            service TEXT NOT NULL,
+            status TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            error TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -1216,7 +1228,7 @@ def _list_trigger_events(limit: int = 30) -> list[dict]:
 
 
 def _enqueue_run(workflow_id: str, payload: dict | None = None, priority: int = 5, max_attempts: int = 3) -> dict:
-    queue_id = _stable_id("queue", {"workflow_id": workflow_id, "priority": priority})
+    queue_id = _stable_id("queue", {"workflow_id": workflow_id, "priority": priority, "payload": payload or {}})
     now = _now_iso()
     conn = _platform_db()
     conn.execute(
@@ -1246,6 +1258,28 @@ def _enqueue_run(workflow_id: str, payload: dict | None = None, priority: int = 
 def _list_run_queue() -> list[dict]:
     conn = _platform_db()
     rows = conn.execute("SELECT * FROM run_queue ORDER BY status ASC, priority ASC, created_at ASC LIMIT 50").fetchall()
+    conn.close()
+    return [
+        {
+            **dict(row),
+            "payload": _json_loads(row["payload_json"], {}),
+        }
+        for row in rows
+    ]
+
+
+def _due_queue_items(limit: int = 5) -> list[dict]:
+    now = _now_iso()
+    conn = _platform_db()
+    rows = conn.execute(
+        """
+        SELECT * FROM run_queue
+        WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        ORDER BY priority ASC, created_at ASC
+        LIMIT ?
+        """,
+        (now, limit),
+    ).fetchall()
     conn.close()
     return [
         {
@@ -1309,6 +1343,35 @@ async def _process_queue_item(queue_id: str) -> dict:
         payload={"queue_id": queue_id, "status": final_status, "attempts": attempts, "max_attempts": max_attempts},
     )
     return {"queue_id": queue_id, "queue_status": final_status, "run": {**result, **run_meta}}
+
+
+async def _process_due_queue(limit: int = 5) -> dict:
+    processed = []
+    for item in _due_queue_items(limit=limit):
+        processed.append(await _process_queue_item(item["id"]))
+    if processed:
+        _record_observability_event(
+            "worker",
+            "info",
+            "due_queue_processed",
+            "run_queue",
+            {"count": len(processed), "queue_ids": [item["queue_id"] for item in processed]},
+        )
+    return {"processed": processed, "count": len(processed)}
+
+
+async def _queue_worker_loop():
+    interval = max(2, int(os.getenv("FORGEFLOW_QUEUE_WORKER_INTERVAL", "10")))
+    _record_observability_event("worker", "info", "queue_worker_started", "run_queue", {"interval_seconds": interval})
+    while True:
+        try:
+            await _process_due_schedules()
+            await _process_due_queue(limit=int(os.getenv("FORGEFLOW_QUEUE_WORKER_BATCH", "5")))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _record_observability_event("worker", "error", "queue_worker_error", "run_queue", {"error": str(exc)[:500]})
+        await asyncio.sleep(interval)
 
 
 def _all_capabilities() -> list[dict]:
@@ -2169,6 +2232,163 @@ def _validate_connector_adapter(adapter_id: str) -> dict:
     return record
 
 
+def _connector_probe_request(service: str, secret: str | None) -> dict | None:
+    headers = {"Accept": "application/json"}
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    if service == "slack":
+        return {"method": "POST", "url": "https://slack.com/api/auth.test", "headers": headers, "body": None}
+    if service == "stripe":
+        return {"method": "GET", "url": "https://api.stripe.com/v1/balance", "headers": headers, "body": None}
+    if service == "gmail":
+        return {"method": "GET", "url": "https://gmail.googleapis.com/gmail/v1/users/me/profile", "headers": headers, "body": None}
+    if service == "sheets":
+        sheet_id = os.getenv("GOOGLE_SHEET_ID", "")
+        if not sheet_id:
+            return None
+        return {"method": "GET", "url": f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}", "headers": headers, "body": None}
+    if service == "calendar":
+        return {"method": "GET", "url": "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1", "headers": headers, "body": None}
+    if service == "hubspot":
+        return {"method": "GET", "url": "https://api.hubapi.com/crm/v3/owners?limit=1", "headers": headers, "body": None}
+    if service == "zendesk":
+        subdomain = os.getenv("ZENDESK_SUBDOMAIN", "")
+        if not subdomain:
+            return None
+        return {"method": "GET", "url": f"https://{subdomain}.zendesk.com/api/v2/users/me.json", "headers": headers, "body": None}
+    if service == "okta":
+        org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
+        if not org_url:
+            return None
+        return {"method": "GET", "url": f"{org_url}/api/v1/users?limit=1", "headers": {"Accept": "application/json", "Authorization": f"SSWS {secret}"}, "body": None}
+    if service == "salesforce":
+        instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
+        if not instance_url:
+            return None
+        return {"method": "GET", "url": f"{instance_url}/services/data/v60.0/limits", "headers": headers, "body": None}
+    if service == "jira":
+        base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
+        email = os.getenv("JIRA_EMAIL", "")
+        if not base_url or not email:
+            return None
+        auth = base64.b64encode(f"{email}:{secret}".encode("utf-8")).decode("ascii")
+        return {"method": "GET", "url": f"{base_url}/rest/api/3/myself", "headers": {"Accept": "application/json", "Authorization": f"Basic {auth}"}, "body": None}
+    if service == "notion":
+        return {"method": "GET", "url": "https://api.notion.com/v1/users/me", "headers": {**headers, "Notion-Version": "2022-06-28"}, "body": None}
+    if service == "airtable":
+        return {"method": "GET", "url": "https://api.airtable.com/v0/meta/whoami", "headers": headers, "body": None}
+    if service == "teams":
+        return {"method": "GET", "url": "https://graph.microsoft.com/v1.0/me", "headers": headers, "body": None}
+    return None
+
+
+def _record_connector_test(service: str, status: str, mode: str, request_data: dict, response_data: dict | None = None, error: str | None = None) -> dict:
+    record = {
+        "id": _stable_id("connector_test", {"service": service, "status": status, "mode": mode}),
+        "service": service,
+        "status": status,
+        "mode": mode,
+        "request": request_data,
+        "response": response_data or {},
+        "error": error,
+        "created_at": _now_iso(),
+    }
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO connector_tests
+        (id, service, status, mode, request_json, response_json, error, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["id"],
+            service,
+            status,
+            mode,
+            json.dumps(record["request"]),
+            json.dumps(record["response"]),
+            error,
+            record["created_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+    _record_observability_event(
+        "connector",
+        "error" if status == "failed" else "info",
+        "connector_test_completed",
+        service,
+        {"status": status, "mode": mode, "error": error},
+    )
+    return record
+
+
+def _list_connector_tests(limit: int = 40) -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM connector_tests ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [
+        {
+            "id": row["id"],
+            "service": row["service"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "request": _json_loads(row["request_json"], {}),
+            "response": _json_loads(row["response_json"], {}),
+            "error": row["error"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def _test_connector_service(service: str, live: bool = False) -> dict:
+    service = service.lower().strip()
+    if service not in SUPPORTED_SERVICES:
+        raise HTTPException(status_code=404, detail="Connector service not found")
+    if service in {"schema", "approval"}:
+        return _record_connector_test(service, "ready", "local_contract", {"kind": "local"}, {"message": "Local connector does not require external credentials."})
+    if service == "http" and not live:
+        return _record_connector_test(service, "ready", "dry_run", {"kind": "generic_http"}, {"message": "HTTP connector validates per-request URL at execution time."})
+
+    secret = _secret_for_service(service)
+    if not secret:
+        return _record_connector_test(service, "missing_credentials", "credential_check", {"kind": "credential_lookup"}, {"missing": "credential"})
+
+    request_spec = _connector_probe_request(service, secret)
+    if not request_spec:
+        missing_env = _env_status(SUPPORTED_SERVICES[service].get("env_vars", ())).get("missing", [])
+        return _record_connector_test(service, "blocked", "read_only_probe", {"kind": "provider_probe"}, {"missing_env": missing_env}, "Provider probe needs additional non-secret configuration.")
+
+    safe_request = {
+        "method": request_spec["method"],
+        "url": request_spec["url"],
+        "headers": sorted([key for key in request_spec.get("headers", {}) if key.lower() != "authorization"]),
+    }
+    if not live:
+        return _record_connector_test(service, "ready_to_probe", "dry_run", safe_request, {"message": "Credential exists. Enable live probe to verify provider access."})
+
+    try:
+        req = Request(
+            request_spec["url"],
+            data=request_spec.get("body"),
+            headers=request_spec.get("headers", {}),
+            method=request_spec.get("method", "GET"),
+        )
+        with urlopen(req, timeout=15) as response:
+            text = response.read().decode("utf-8", errors="replace")[:2000]
+            parsed = _json_loads(text, {"text": text})
+            status = "connected" if response.status < 400 else "failed"
+            return _record_connector_test(service, status, "live_read_only_probe", safe_request, {"status_code": response.status, "body": parsed})
+    except HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="replace")[:1000] if hasattr(exc, "read") else str(exc)
+        return _record_connector_test(service, "failed", "live_read_only_probe", safe_request, {"status_code": exc.code}, error_text)
+    except URLError as exc:
+        return _record_connector_test(service, "failed", "live_read_only_probe", safe_request, {}, str(exc.reason)[:1000])
+    except Exception as exc:
+        return _record_connector_test(service, "failed", "live_read_only_probe", safe_request, {}, str(exc)[:1000])
+
+
 def _repair_runtime_run(run_id: str) -> dict:
     run = next((item for item in _list_runtime_runs(limit=100) if item["id"] == run_id), None)
     if not run:
@@ -2976,7 +3196,25 @@ async def lifespan(app: FastAPI):
     else:
         print("[Slack] App token not configured — /forge command disabled")
 
-    yield
+    worker_enabled = os.getenv("FORGEFLOW_QUEUE_WORKER", "0").lower() in ("1", "true", "yes")
+    queue_worker_task = None
+    if worker_enabled:
+        queue_worker_task = asyncio.create_task(_queue_worker_loop())
+        app.state.queue_worker_enabled = True
+        print("[ForgeFlow] Queue worker enabled")
+    else:
+        app.state.queue_worker_enabled = False
+        print("[ForgeFlow] Queue worker disabled — set FORGEFLOW_QUEUE_WORKER=1 to process hosted jobs automatically")
+
+    try:
+        yield
+    finally:
+        if queue_worker_task:
+            queue_worker_task.cancel()
+            try:
+                await queue_worker_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="ForgeFlow", version="1.0.0", lifespan=lifespan)
@@ -3152,6 +3390,18 @@ async def validate_connector_adapter(adapter_id: str):
     return {"validation": _validate_connector_adapter(adapter_id)}
 
 
+@app.post("/api/connectors/{service}/test")
+async def test_connector_service(service: str, body: dict | None = None):
+    """Run a credential-safe connector test. live=true performs a read-only provider probe."""
+    body = body or {}
+    return {"test": _test_connector_service(service, live=bool(body.get("live")))}
+
+
+@app.get("/api/connectors/tests")
+async def connector_tests():
+    return {"tests": _list_connector_tests()}
+
+
 @app.post("/api/challenge/conversation")
 async def challenge_conversation(body: dict):
     """Collect business requirements in plain English before generation."""
@@ -3266,6 +3516,16 @@ async def run_queue():
     return {"queue": _list_run_queue()}
 
 
+@app.get("/api/runs/queue/worker")
+async def queue_worker_status():
+    return {
+        "enabled": bool(getattr(app.state, "queue_worker_enabled", False)),
+        "interval_seconds": int(os.getenv("FORGEFLOW_QUEUE_WORKER_INTERVAL", "10")),
+        "batch_size": int(os.getenv("FORGEFLOW_QUEUE_WORKER_BATCH", "5")),
+        "due": _due_queue_items(limit=20),
+    }
+
+
 @app.post("/api/runs/queue")
 async def enqueue_run(body: dict):
     workflow_id = str(body.get("workflow_id", "")).strip()
@@ -3282,6 +3542,12 @@ async def enqueue_run(body: dict):
 @app.post("/api/runs/queue/{queue_id}/process")
 async def process_run_queue_item(queue_id: str):
     return await _process_queue_item(queue_id)
+
+
+@app.post("/api/runs/queue/process-due")
+async def process_due_run_queue(body: dict | None = None):
+    body = body or {}
+    return await _process_due_queue(limit=int(body.get("limit", 5)))
 
 
 @app.get("/api/approvals")
@@ -3698,6 +3964,7 @@ async def connector_lifecycle():
         "oauth_sessions": _list_oauth_sessions(),
         "credentials": _list_credentials(),
         "credential_audit": _list_credential_audit(),
+        "connector_tests": _list_connector_tests(),
     }
 
 

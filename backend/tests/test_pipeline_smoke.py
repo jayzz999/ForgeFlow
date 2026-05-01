@@ -838,6 +838,39 @@ def test_connector_adapters_report_contract_methods(monkeypatch, tmp_path):
     } <= adapter_ids
 
 
+def test_connector_tests_are_recorded_without_exposing_secret(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_VAULT_KEY", "unit-test-vault-key")
+
+    missing = main._test_connector_service("stripe")
+    main._store_credential("stripe", "Stripe test key", "api_key", "sk_test_secret")
+    ready = main._test_connector_service("stripe", live=False)
+    tests = main._list_connector_tests()
+
+    assert missing["status"] == "missing_credentials"
+    assert ready["status"] == "ready_to_probe"
+    assert "sk_test_secret" not in str(tests)
+    assert tests[0]["request"]["url"] == "https://api.stripe.com/v1/balance"
+
+
+@pytest.mark.asyncio
+async def test_due_queue_processor_marks_dead_letter(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    queued = main._enqueue_run("missing_workflow", {"source": "due-test"}, max_attempts=1)
+    processed = await main._process_due_queue(limit=5)
+    queue = main._list_run_queue()
+
+    assert processed["count"] == 1
+    assert processed["processed"][0]["queue_id"] == queued["id"]
+    assert queue[0]["status"] == "dead_letter"
+    assert queue[0]["dead_letter_reason"] == "Workflow not found"
+
+
 def test_business_conversation_stays_non_technical():
     from backend import main
 
