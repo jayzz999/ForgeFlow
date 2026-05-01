@@ -103,9 +103,6 @@ export default function App() {
           <span className="text-xs text-forge-muted px-2 py-0.5 rounded-full bg-forge-border/50 border border-forge-border">
             AI Workflow Generator
           </span>
-          <span className="text-[10px] text-indigo-400/60 hidden sm:inline">
-            Built for AI Talent Sprint
-          </span>
         </div>
         <div className="flex items-center gap-3">
           {/* Download button — only when deployed */}
