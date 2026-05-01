@@ -829,3 +829,49 @@ def test_connector_adapters_report_contract_methods(monkeypatch, tmp_path):
 
     assert {"auth_check", "dry_run", "execute", "compensate"} <= set(slack["methods"])
     assert slack["risk"] == "external_write"
+
+
+def test_business_conversation_stays_non_technical():
+    from backend import main
+
+    result = main._business_conversation("Automate employee onboarding from an Excel sheet and send Gmail.")
+
+    assert result["known_systems"] == ["Gmail", "Google Sheets"]
+    assert any("real schema" in item.lower() for item in result["process_steps"])
+    assert any("upload or connect" in item.lower() for item in result["questions"])
+    assert "No invented names, columns, or API fields." in result["non_technical_contract"]
+
+
+@pytest.mark.asyncio
+async def test_hr_onboarding_demo_covers_challenge_loop(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    result = await main._run_hr_onboarding_demo()
+
+    assert result["answer_to_challenge"]["live_generation"] is True
+    assert result["answer_to_challenge"]["executable_output"] is True
+    assert result["answer_to_challenge"]["human_oversight"] is True
+    assert result["answer_to_challenge"]["live_external_calls_performed"] is False
+    assert {item["platform"] for item in result["exports"]} == {"forgeflow", "n8n", "github_actions"}
+    assert result["repair"]["actions"]
+    assert main._list_workflow_exports(result["spec"]["id"])
+
+
+@pytest.mark.asyncio
+async def test_export_validate_and_repair_runtime_run(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    spec = await main._compile_automation_spec("Send a Slack message when a spreadsheet row is added.")
+    exported = main._export_spec_to_platform(spec["id"], "zapier")
+    validation = main._validate_connector_adapter("slack.post_message")
+    run = await main._dry_run_automation_spec(spec["id"], {"row": 1})
+    repair = main._repair_runtime_run(run["id"])
+
+    assert exported["artifact"]["format"] == "zapier.transfer.json"
+    assert validation["checks"][0]["status"] == "pass"
+    assert repair["run_id"] == run["id"]
+    assert any(action["type"] in {"credential_request", "approval_gate", "no_repair_needed"} for action in repair["actions"])

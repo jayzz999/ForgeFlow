@@ -1435,9 +1435,34 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
 function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefresh, onGapsRefresh }) {
   const [prompt, setPrompt] = useState('Automate HR onboarding from an Excel sheet, draft a Gmail welcome email, post a Slack announcement, and append a Google Sheets tracking row.')
   const [activeSpec, setActiveSpec] = useState(null)
+  const [conversation, setConversation] = useState(null)
+  const [exports, setExports] = useState([])
+  const [validations, setValidations] = useState([])
+  const [repairs, setRepairs] = useState([])
   const [message, setMessage] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
+
+  const askConversation = async () => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/challenge/conversation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setConversation(payload.conversation)
+      setMessage(`Found ${payload.conversation.process_steps.length} business steps and ${payload.conversation.questions.length} clarification questions`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const compileSpec = async () => {
     setLoading(true)
@@ -1484,19 +1509,103 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
     }
   }
 
+  const exportSpec = async (specId, platform) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/specs/${specId}/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setExports((items) => [payload.export, ...items].slice(0, 6))
+      setMessage(`Exported ${payload.export.platform} artifact`)
+      onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const validateAdapter = async (adapterId) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/connectors/adapters/${adapterId}/validate`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setValidations((items) => [payload.validation, ...items.filter((item) => item.adapter_id !== adapterId)].slice(0, 8))
+      setMessage(`${adapterId} validation: ${payload.validation.status}`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const repairRun = async (runId) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runtime/runs/${runId}/repair`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setRepairs((items) => [payload.repair, ...items].slice(0, 6))
+      setMessage(`Repair plan created with ${payload.repair.actions.length} actions`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const runHrDemo = async () => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/demo/hr-onboarding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setConversation(payload.conversation)
+      setActiveSpec(payload.spec)
+      setExports(payload.exports)
+      setValidations(payload.validations)
+      setRepairs([payload.repair])
+      setMessage(`HR onboarding demo generated ${payload.spec.steps.length} steps, ${payload.exports.length} exports, and a ${payload.run.status} dry-run`)
+      onSpecsRefresh()
+      onRunsRefresh()
+      onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const latestSpec = activeSpec || specs?.specs?.[0]
   const runs = runtimeRuns?.runs || []
 
   return (
     <div className="space-y-8">
       <SectionTitle
-        eyebrow="Runtime Orchestrator"
-        title="Compile prompts into specs before writing code"
-        description="ForgeFlow now creates a canonical automation spec, maps it to typed connector adapters, and records dry-run steps in a structured runtime ledger."
+        eyebrow="Prompt to production loop"
+        title="Business request to tested automation"
+        description="Collect missing facts in plain English, compile a grounded spec, validate connectors, export to workflow platforms, dry-run every step, and repair blocked runs."
       />
       <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Canonical spec compiler</h3>
+          <h3 className="text-sm font-semibold">Requirement conversation</h3>
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
@@ -1504,6 +1613,9 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
             className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm leading-6 outline-none focus:border-sky-400/50"
           />
           <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={askConversation} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
+              <Search size={16} /> Ask smart questions
+            </button>
             <button onClick={compileSpec} disabled={loading} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200 disabled:opacity-50">
               <Workflow size={16} /> Compile spec
             </button>
@@ -1512,8 +1624,27 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
                 <Play size={16} /> Dry-run spec
               </button>
             )}
+            <button onClick={runHrDemo} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-400/15 disabled:opacity-50">
+              <Rocket size={16} /> Run HR demo
+            </button>
           </div>
           {(message || error) && <div className={`mt-4 rounded-lg border p-3 text-xs ${error ? 'border-red-400/30 bg-red-400/10 text-red-300' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'}`}>{error || message}</div>}
+          {conversation && (
+            <div className="mt-4 rounded-lg border border-forge-border bg-forge-bg/50 p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-forge-muted">Plain-English plan</div>
+              <div className="mt-3 space-y-2">
+                {conversation.process_steps.map((step) => <div key={step} className="text-sm text-forge-text">{step}</div>)}
+              </div>
+              {conversation.questions.length ? (
+                <div className="mt-4 rounded-lg bg-amber-400/10 p-3">
+                  <div className="text-xs font-medium text-amber-200">Questions before live execution</div>
+                  <div className="mt-2 space-y-1">
+                    {conversation.questions.map((question) => <div key={question} className="text-xs text-amber-100">{question}</div>)}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
 
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
@@ -1540,10 +1671,57 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
               {latestSpec.questions?.length ? (
                 <div className="rounded-lg bg-amber-400/10 p-3 text-xs text-amber-200">{latestSpec.questions.length} missing facts before live execution</div>
               ) : null}
+              <div className="flex flex-wrap gap-2 pt-1">
+                {['forgeflow', 'n8n', 'zapier', 'github_actions'].map((platform) => (
+                  <button key={platform} onClick={() => exportSpec(latestSpec.id, platform)} disabled={loading} className="rounded-lg border border-forge-border px-3 py-1.5 text-xs text-forge-muted hover:text-sky-200 disabled:opacity-50">
+                    Export {platform.replace('_', ' ')}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
       </div>
+
+      {(exports.length > 0 || repairs.length > 0) && (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+            <h3 className="text-sm font-semibold">Executable exports</h3>
+            {exports.length === 0 ? <EmptyState title="No exports yet" body="Export the latest spec to ForgeFlow, n8n, Zapier, or GitHub Actions." /> : (
+              <div className="mt-4 space-y-3">
+                {exports.map((item) => (
+                  <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{item.platform}</div>
+                      <span className="rounded-full bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{item.artifact?.format}</span>
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-xs text-forge-muted">{JSON.stringify(item.artifact).slice(0, 180)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+            <h3 className="text-sm font-semibold">Self-repair plans</h3>
+            {repairs.length === 0 ? <EmptyState title="No repair plan yet" body="Repair a blocked run to turn errors into credential, approval, or debugging actions." /> : (
+              <div className="mt-4 space-y-3">
+                {repairs.map((repair) => (
+                  <div key={repair.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{repair.status}</div>
+                      <span className="text-xs text-forge-muted">{repair.actions.length} actions</span>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {repair.actions.slice(0, 3).map((action) => <div key={`${repair.id}-${action.type}-${action.step_id || action.message}`} className="text-xs text-forge-muted">{action.message}</div>)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
@@ -1556,9 +1734,20 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
                   <span className={`rounded-full px-2 py-1 text-[11px] ${adapter.status === 'ready' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{adapter.status}</span>
                 </div>
                 <p className="mt-2 text-xs text-forge-muted">{adapter.methods.join(' · ')}</p>
+                <button onClick={() => validateAdapter(adapter.id)} disabled={loading} className="mt-3 rounded-lg border border-forge-border px-3 py-1.5 text-xs text-forge-muted hover:text-sky-200 disabled:opacity-50">
+                  Validate
+                </button>
               </div>
             ))}
           </div>
+          {validations.length ? (
+            <div className="mt-4 rounded-lg bg-forge-bg/60 p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-forge-muted">Latest validations</div>
+              <div className="mt-2 space-y-1">
+                {validations.slice(0, 4).map((item) => <div key={item.id} className="text-xs text-forge-muted">{item.adapter_id}: {item.status}</div>)}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
@@ -1572,6 +1761,9 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
                     <span className="rounded-full bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{run.status}</span>
                   </div>
                   <div className="mt-1 text-xs text-forge-muted">{run.mode} · {run.started_at}</div>
+                  <button onClick={() => repairRun(run.id)} disabled={loading} className="mt-3 rounded-lg border border-forge-border px-3 py-1.5 text-xs text-forge-muted hover:text-sky-200 disabled:opacity-50">
+                    Repair / explain blockers
+                  </button>
                   <div className="mt-3 grid gap-2 md:grid-cols-2">
                     {run.steps.map((step) => (
                       <div key={step.id} className="rounded-lg border border-forge-border bg-forge-panel px-3 py-2">
@@ -1740,7 +1932,10 @@ function EmptyState({ title, body }) {
 function AppWorkspace({ onLanding }) {
   const ws = useWebSocket()
   const { status: providerStatus, error: providerError } = useProviderStatus()
-  const [activeView, setActiveView] = useState('dashboard')
+  const [activeView, setActiveView] = useState(() => {
+    const requested = new URLSearchParams(window.location.search).get('view')
+    return NAV_ITEMS.some((item) => item.id === requested) ? requested : 'dashboard'
+  })
   const overview = useApiResource('/api/product/overview', { metrics: {}, workflows: [], recent_runs: [] })
   const capabilities = useApiResource('/api/capabilities', { capabilities: [] })
   const approvals = useApiResource('/api/approvals', { pending: [], policy: [] })
@@ -1832,7 +2027,10 @@ function AppWorkspace({ onLanding }) {
 }
 
 export default function App() {
-  const [surface, setSurface] = useState('landing')
+  const [surface, setSurface] = useState(() => {
+    const requested = new URLSearchParams(window.location.search).get('view')
+    return NAV_ITEMS.some((item) => item.id === requested) ? 'app' : 'landing'
+  })
   return surface === 'landing'
     ? <LandingPage onOpenApp={() => setSurface('app')} />
     : <AppWorkspace onLanding={() => setSurface('landing')} />
