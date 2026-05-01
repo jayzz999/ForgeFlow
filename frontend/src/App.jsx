@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react'
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   ArrowRight,
@@ -18,10 +18,13 @@ import {
   LayoutDashboard,
   LockKeyhole,
   Play,
+  PlugZap,
   Rocket,
+  Server,
   Search,
   ShieldCheck,
   Sparkles,
+  TimerReset,
   Upload,
   Workflow,
   Wrench,
@@ -42,7 +45,10 @@ const NAV_ITEMS = [
   { id: 'connectors', label: 'Connectors', Icon: Blocks },
   { id: 'schemas', label: 'Schemas', Icon: FileSpreadsheet },
   { id: 'approvals', label: 'Approvals', Icon: ClipboardCheck },
+  { id: 'triggers', label: 'Triggers', Icon: TimerReset },
+  { id: 'deployments', label: 'Deployments', Icon: Server },
   { id: 'runs', label: 'Run History', Icon: History },
+  { id: 'ingestions', label: 'Ingestions', Icon: PlugZap },
   { id: 'templates', label: 'Templates', Icon: Layers3 },
   { id: 'roadmap', label: 'Roadmap', Icon: GitBranch },
 ]
@@ -54,9 +60,10 @@ function useApiResource(path, fallback) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  useEffect(() => {
+  const refetch = useCallback(() => {
     let alive = true
     setLoading(true)
+    setError(null)
     fetch(`${API_URL}${path}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -76,7 +83,9 @@ function useApiResource(path, fallback) {
     }
   }, [path])
 
-  return { data, loading, error }
+  useEffect(() => refetch(), [refetch])
+
+  return { data, loading, error, refetch, setData }
 }
 
 function LogoMark() {
@@ -495,6 +504,22 @@ function BuilderView(props) {
 
 function ConnectorsView({ providerStatus, capabilities }) {
   const services = providerStatus?.services || {}
+  const [oauthResult, setOauthResult] = useState(null)
+  const [oauthError, setOauthError] = useState(null)
+
+  const startOAuth = async (service) => {
+    setOauthError(null)
+    setOauthResult(null)
+    try {
+      const res = await fetch(`${API_URL}/api/connectors/oauth/${service}/start`)
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setOauthResult(payload)
+    } catch (err) {
+      setOauthError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -517,9 +542,29 @@ function ConnectorsView({ providerStatus, capabilities }) {
             <p className="mt-2 min-h-10 text-xs leading-5 text-forge-muted">
               Requires {service.required_env?.length ? service.required_env.join(', ') : 'no credentials'}
             </p>
+            {['gmail', 'sheets', 'slack'].includes(key) && (
+              <button
+                onClick={() => startOAuth(key)}
+                className="mt-4 inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:border-sky-400/40 hover:text-sky-200"
+              >
+                <KeyRound size={14} /> Start OAuth
+              </button>
+            )}
           </div>
         ))}
       </div>
+
+      {(oauthResult || oauthError) && (
+        <div className={`rounded-lg border p-4 text-sm ${oauthError ? 'border-red-400/30 bg-red-400/10 text-red-300' : 'border-sky-400/30 bg-sky-400/10 text-sky-100'}`}>
+          {oauthError ? oauthError : (
+            <div className="space-y-2">
+              <div className="font-medium">{oauthResult.service} authorization scaffold ready</div>
+              <div className="break-all text-xs text-forge-muted">{oauthResult.auth_url}</div>
+              <div className="text-xs text-forge-muted">Scopes: {oauthResult.scopes.join(', ')}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
         <h3 className="mb-4 text-sm font-semibold">Capability registry</h3>
@@ -623,7 +668,50 @@ function SchemaExplorerView() {
   )
 }
 
-function ApprovalsView({ approvals }) {
+function ApprovalsView({ approvals, onRefresh }) {
+  const [form, setForm] = useState({
+    title: 'Preview outbound Slack message',
+    workflow_id: 'workflow-demo',
+    action_type: 'slack.postMessage',
+    risk: 'external_write',
+    preview: '{ "channel": "#ops", "text": "Draft message awaiting approval" }',
+  })
+  const [error, setError] = useState(null)
+
+  const createApproval = async () => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/approvals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: form.title,
+          workflow_id: form.workflow_id,
+          action_type: form.action_type,
+          risk: form.risk,
+          preview: JSON.parse(form.preview || '{}'),
+        }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const decide = async (approvalId, decision) => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/approvals/${approvalId}/${decision}`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -631,11 +719,66 @@ function ApprovalsView({ approvals }) {
         title="External actions should pause here"
         description="Emails, Slack posts, record writes, deletions, and permission changes should be previewed and approved before execution."
       />
-      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-        <h3 className="text-sm font-semibold">Pending approvals</h3>
-        {(approvals?.pending || []).length === 0 ? (
-          <EmptyState title="No approvals waiting" body="Generated workflows will place risky external actions here before they run." />
-        ) : null}
+      <div className="grid gap-4 xl:grid-cols-[0.85fr_1.15fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Create action preview</h3>
+          <div className="mt-4 space-y-3">
+            {[
+              ['title', 'Title'],
+              ['workflow_id', 'Workflow ID'],
+              ['action_type', 'Action type'],
+              ['risk', 'Risk'],
+            ].map(([key, label]) => (
+              <label key={key} className="block text-xs text-forge-muted">
+                {label}
+                <input
+                  value={form[key]}
+                  onChange={(event) => setForm({ ...form, [key]: event.target.value })}
+                  className="mt-1 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm text-forge-text outline-none focus:border-sky-400/50"
+                />
+              </label>
+            ))}
+            <label className="block text-xs text-forge-muted">
+              Preview JSON
+              <textarea
+                value={form.preview}
+                onChange={(event) => setForm({ ...form, preview: event.target.value })}
+                rows={5}
+                className="mt-1 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 font-mono text-xs text-forge-text outline-none focus:border-sky-400/50"
+              />
+            </label>
+            <button onClick={createApproval} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+              <ClipboardCheck size={16} /> Queue approval
+            </button>
+            {error && <div className="text-xs text-red-300">{error}</div>}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Pending approvals</h3>
+          {(approvals?.pending || []).length === 0 ? (
+            <EmptyState title="No approvals waiting" body="Generated workflows will place risky external actions here before they run." />
+          ) : (
+            <div className="mt-4 space-y-3">
+              {(approvals?.pending || []).map((item) => (
+                <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-medium">{item.title}</div>
+                      <div className="mt-1 text-xs text-forge-muted">{item.workflow_id || 'unassigned'} · {item.action_type}</div>
+                    </div>
+                    <span className="rounded-full bg-amber-400/10 px-2 py-1 text-[11px] text-amber-300">{item.risk}</span>
+                  </div>
+                  <pre className="mt-3 max-h-28 overflow-auto rounded-lg bg-black/20 p-3 text-xs text-forge-muted">{JSON.stringify(item.preview || {}, null, 2)}</pre>
+                  <div className="mt-3 flex gap-2">
+                    <button onClick={() => decide(item.id, 'approve')} className="rounded-lg bg-emerald-300 px-3 py-2 text-xs font-semibold text-slate-950">Approve</button>
+                    <button onClick={() => decide(item.id, 'reject')} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-forge-text">Reject</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         {(approvals?.policy || []).map((item) => (
@@ -649,7 +792,7 @@ function ApprovalsView({ approvals }) {
   )
 }
 
-function RunsView({ runs }) {
+function RunsView({ runs, onRefresh }) {
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -658,18 +801,36 @@ function RunsView({ runs }) {
         description="Every generated automation needs a visible audit trail: inputs, tests, status, logs, retries, and replay."
       />
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-        <RunList runs={runs?.runs || []} />
+        <RunList runs={runs?.runs || []} onRefresh={onRefresh} />
       </div>
     </div>
   )
 }
 
-function RunList({ runs }) {
+function RunList({ runs, onRefresh }) {
+  const [retrying, setRetrying] = useState(null)
+  const [error, setError] = useState(null)
+
+  const retryRun = async (runId) => {
+    setRetrying(runId)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runs/${runId}/retry`, { method: 'POST' })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setRetrying(null)
+    }
+  }
+
   if (!runs?.length) return <EmptyState title="No runs recorded" body="Run a workflow to populate operational history." />
   return (
     <div className="space-y-2">
       {runs.map((run) => (
-        <div key={run.workflow_id} className="grid gap-3 rounded-lg border border-forge-border bg-forge-bg/50 p-3 md:grid-cols-[1fr_auto_auto] md:items-center">
+        <div key={run.run_id || run.workflow_id} className="grid gap-3 rounded-lg border border-forge-border bg-forge-bg/50 p-3 md:grid-cols-[1fr_auto_auto_auto] md:items-center">
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{run.name}</div>
             <div className="mt-1 text-xs text-forge-muted">{run.workflow_id} · {run.created_at}</div>
@@ -678,8 +839,230 @@ function RunList({ runs }) {
             {run.success ? 'success' : 'needs review'}
           </span>
           <span className="text-xs text-forge-muted">{run.tests_passed}/{run.tests_total} tests</span>
+          {run.run_id && (
+            <button onClick={() => retryRun(run.run_id)} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">
+              {retrying === run.run_id ? 'Retrying...' : 'Retry'}
+            </button>
+          )}
         </div>
       ))}
+      {error && <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-300">{error}</div>}
+    </div>
+  )
+}
+
+function TriggersView({ triggers, onRefresh }) {
+  const [form, setForm] = useState({
+    workflow_id: 'workflow-demo',
+    trigger_type: 'webhook',
+    config: '{ "path": "/webhooks/hr-onboarding", "method": "POST" }',
+  })
+  const [error, setError] = useState(null)
+
+  const createTrigger = async () => {
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/triggers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflow_id: form.workflow_id,
+          trigger_type: form.trigger_type,
+          config: JSON.parse(form.config || '{}'),
+          status: 'paused',
+        }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      onRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="Trigger Engine"
+        title="Make automations start from events, not button clicks"
+        description="Register webhook, schedule, and manual triggers against generated workflows before they are activated in production."
+      />
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Create trigger</h3>
+          <div className="mt-4 space-y-3">
+            <input value={form.workflow_id} onChange={(event) => setForm({ ...form, workflow_id: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="workflow_id" />
+            <select value={form.trigger_type} onChange={(event) => setForm({ ...form, trigger_type: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50">
+              <option value="webhook">webhook</option>
+              <option value="schedule">schedule</option>
+              <option value="manual">manual</option>
+            </select>
+            <textarea value={form.config} onChange={(event) => setForm({ ...form, config: event.target.value })} rows={6} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 font-mono text-xs outline-none focus:border-sky-400/50" />
+            <button onClick={createTrigger} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+              <TimerReset size={16} /> Save trigger
+            </button>
+            {error && <div className="text-xs text-red-300">{error}</div>}
+          </div>
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Registered triggers</h3>
+          {(triggers?.triggers || []).length === 0 ? (
+            <EmptyState title="No triggers yet" body="Create a trigger when a workflow should run from a webhook, schedule, or manual launch." />
+          ) : (
+            <div className="mt-4 space-y-2">
+              {(triggers?.triggers || []).map((trigger) => (
+                <div key={trigger.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">{trigger.workflow_id}</div>
+                    <span className="rounded-full bg-slate-400/10 px-2 py-1 text-[11px] text-slate-300">{trigger.status}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-forge-muted">{trigger.trigger_type} · {trigger.created_at}</div>
+                  <pre className="mt-3 max-h-24 overflow-auto rounded-lg bg-black/20 p-3 text-xs text-forge-muted">{JSON.stringify(trigger.config || {}, null, 2)}</pre>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DeploymentsView({ targets }) {
+  const [workflowId, setWorkflowId] = useState('workflow-demo')
+  const [target, setTarget] = useState('local_docker')
+  const [plan, setPlan] = useState(null)
+  const [error, setError] = useState(null)
+  const targetList = targets?.targets || []
+
+  const createPlan = async () => {
+    setError(null)
+    setPlan(null)
+    try {
+      const res = await fetch(`${API_URL}/api/deploy/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow_id: workflowId, target }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setPlan(payload)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="Deployment Targets"
+        title="Convert generated projects into planned production releases"
+        description="Deployment plans validate files, secrets, tests, artifacts, and activation steps before anything is promoted."
+      />
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {targetList.map((item) => (
+          <div key={item.id} className="rounded-lg border border-forge-border bg-forge-panel p-4">
+            <Cloud className="mb-4 text-sky-300" size={20} />
+            <div className="text-sm font-semibold">{item.label || item.name}</div>
+            <p className="mt-2 min-h-16 text-xs leading-5 text-forge-muted">{item.description}</p>
+            <span className={`mt-3 inline-flex rounded-full px-2 py-1 text-[11px] ${item.status === 'available' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{item.status}</span>
+          </div>
+        ))}
+      </div>
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Create deployment plan</h3>
+          <div className="mt-4 space-y-3">
+            <input value={workflowId} onChange={(event) => setWorkflowId(event.target.value)} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" />
+            <select value={target} onChange={(event) => setTarget(event.target.value)} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50">
+              {targetList.map((item) => <option key={item.id} value={item.id}>{item.label || item.name}</option>)}
+            </select>
+            <button onClick={createPlan} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+              <Rocket size={16} /> Plan release
+            </button>
+            {error && <div className="text-xs text-red-300">{error}</div>}
+          </div>
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Plan detail</h3>
+          {!plan ? <EmptyState title="No deployment plan selected" body="Pick a workflow and target to generate a promotion checklist." /> : (
+            <div className="mt-4 space-y-3">
+              <div className="text-sm font-medium">{plan.plan.workflow_id} to {plan.plan.target}</div>
+              {plan.plan.steps.map((step) => <ReadinessRow key={step} label={step} value="required" ok />)}
+              <div className="rounded-lg bg-amber-400/10 p-3 text-xs text-amber-200">{plan.plan.next_action}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh }) {
+  const [openApiText, setOpenApiText] = useState('{\n  "openapi": "3.0.0",\n  "info": { "title": "HR Platform", "version": "1.0" },\n  "paths": {\n    "/candidates": { "get": { "operationId": "listCandidates", "summary": "List candidates" } },\n    "/employees": { "post": { "operationId": "createEmployee", "summary": "Create employee" } }\n  }\n}')
+  const [mcpText, setMcpText] = useState('{\n  "name": "hr-records-mcp",\n  "tools": [\n    { "name": "lookup_employee", "description": "Find an employee by email", "input_schema": { "email": "string" } },\n    { "name": "create_onboarding_task", "description": "Create an onboarding task", "input_schema": { "employee_id": "string" } }\n  ]\n}')
+  const [message, setMessage] = useState(null)
+  const [error, setError] = useState(null)
+
+  const ingest = async (kind) => {
+    setMessage(null)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/${kind === 'openapi' ? 'openapi' : 'mcp'}/ingest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: kind === 'openapi' ? openApiText : mcpText,
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setMessage(`${payload.name} imported ${payload.capabilities.length} capabilities`)
+      onCapabilitiesRefresh()
+      onIngestionsRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <SectionTitle
+        eyebrow="Adapter Ingestion"
+        title="Teach ForgeFlow tools before the user writes prompts"
+        description="Import OpenAPI specs and MCP tool manifests so planning uses real operations, input schemas, and risk labels instead of hallucinated connectors."
+      />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">OpenAPI upload/import</h3>
+          <textarea value={openApiText} onChange={(event) => setOpenApiText(event.target.value)} rows={14} className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 font-mono text-xs outline-none focus:border-sky-400/50" />
+          <button onClick={() => ingest('openapi')} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+            <Upload size={16} /> Import OpenAPI
+          </button>
+        </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">MCP adapter manifest</h3>
+          <textarea value={mcpText} onChange={(event) => setMcpText(event.target.value)} rows={14} className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 font-mono text-xs outline-none focus:border-sky-400/50" />
+          <button onClick={() => ingest('mcp')} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
+            <PlugZap size={16} /> Import MCP
+          </button>
+        </div>
+      </div>
+      {(message || error) && <div className={`rounded-lg border p-4 text-sm ${error ? 'border-red-400/30 bg-red-400/10 text-red-300' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'}`}>{error || message}</div>}
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <h3 className="text-sm font-semibold">Imported adapters</h3>
+        {(ingestions?.ingestions || []).length === 0 ? <EmptyState title="No adapters imported" body="Import an OpenAPI spec or MCP manifest to add grounded capabilities." /> : (
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {(ingestions?.ingestions || []).map((item) => (
+              <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium">{item.name}</div>
+                  <span className="rounded-full bg-sky-400/10 px-2 py-1 text-[11px] text-sky-300">{item.source_type}</span>
+                </div>
+                <div className="mt-2 text-xs text-forge-muted">{item.capabilities.length} capabilities · {item.created_at}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -756,6 +1139,9 @@ function AppWorkspace({ onLanding }) {
   const approvals = useApiResource('/api/approvals', { pending: [], policy: [] })
   const runs = useApiResource('/api/runs', { runs: [] })
   const templates = useApiResource('/api/templates', { templates: [] })
+  const triggers = useApiResource('/api/triggers', { triggers: [] })
+  const deploymentTargets = useApiResource('/api/deploy/targets', { targets: [] })
+  const ingestions = useApiResource('/api/ingestions', { ingestions: [] })
 
   const activeLabel = useMemo(() => NAV_ITEMS.find((item) => item.id === activeView)?.label || 'Workspace', [activeView])
 
@@ -807,8 +1193,11 @@ function AppWorkspace({ onLanding }) {
           {activeView === 'builder' && <BuilderView {...ws} />}
           {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} />}
           {activeView === 'schemas' && <SchemaExplorerView />}
-          {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} />}
-          {activeView === 'runs' && <RunsView runs={runs.data} />}
+          {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} onRefresh={approvals.refetch} />}
+          {activeView === 'triggers' && <TriggersView triggers={triggers.data} onRefresh={triggers.refetch} />}
+          {activeView === 'deployments' && <DeploymentsView targets={deploymentTargets.data} />}
+          {activeView === 'runs' && <RunsView runs={runs.data} onRefresh={runs.refetch} />}
+          {activeView === 'ingestions' && <IngestionsView ingestions={ingestions.data} onCapabilitiesRefresh={capabilities.refetch} onIngestionsRefresh={ingestions.refetch} />}
           {activeView === 'templates' && <TemplatesView templates={templates.data} onNavigate={setActiveView} />}
           {activeView === 'roadmap' && <RoadmapView />}
         </main>

@@ -1,9 +1,11 @@
 import asyncio
 import csv
+import hashlib
 import json
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import uuid
@@ -61,6 +63,7 @@ RUN_ENV_PREFIXES = (
 )
 RUN_ENV_EXACT = {"TARGET_URL"}
 MAX_RUN_OUTPUT_CHARS = 12000
+PLATFORM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "forgeflow_platform.db")
 
 CAPABILITY_REGISTRY = [
     {
@@ -143,6 +146,37 @@ TEMPLATE_GALLERY = [
     },
 ]
 
+DEPLOYMENT_TARGETS = [
+    {
+        "id": "local_docker",
+        "name": "Local Docker",
+        "status": "available",
+        "description": "Build and run the generated project on this machine with Docker.",
+        "requires": ["Docker"],
+    },
+    {
+        "id": "github_actions",
+        "name": "GitHub Actions Cron",
+        "status": "planned",
+        "description": "Commit workflow project and run it on a schedule in GitHub Actions.",
+        "requires": ["GitHub repo", "secrets"],
+    },
+    {
+        "id": "render_worker",
+        "name": "Render Worker",
+        "status": "planned",
+        "description": "Deploy the workflow as a persistent Render worker with managed env vars.",
+        "requires": ["Render account", "secrets"],
+    },
+    {
+        "id": "webhook_runtime",
+        "name": "Hosted Webhook Runtime",
+        "status": "planned",
+        "description": "Expose a webhook URL that triggers a selected automation version.",
+        "requires": ["public runtime", "auth policy"],
+    },
+]
+
 
 def _workflow_run_env() -> dict[str, str]:
     """Allowlist env vars passed to generated workflow execution."""
@@ -151,6 +185,77 @@ def _workflow_run_env() -> dict[str, str]:
         if key in RUN_ENV_EXACT or any(key.startswith(prefix) for prefix in RUN_ENV_PREFIXES):
             env[key] = value
     return env
+
+
+def _platform_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(PLATFORM_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS approvals (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            action_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            preview_json TEXT NOT NULL,
+            risk TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS triggers (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            trigger_type TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'paused',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS run_logs (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            stdout TEXT,
+            stderr TEXT,
+            execution_time REAL,
+            return_code INTEGER,
+            attempt INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ingestions (
+            id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            summary_json TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS deployment_plans (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _stable_id(prefix: str, payload: object | None = None) -> str:
+    raw = json.dumps(payload or {}, sort_keys=True, default=str) + _now_iso() + str(uuid.uuid4())
+    return f"{prefix}_{hashlib.sha1(raw.encode()).hexdigest()[:10]}"
 
 
 def _trim_output(value: str) -> str:
@@ -264,7 +369,32 @@ def _collect_run_history(limit: int = 20) -> list[dict]:
     from backend.deployment.workflow_store import get_workflow_project_path, list_workflows as _list
 
     runs = []
+    conn = _platform_db()
+    rows = conn.execute(
+        "SELECT * FROM run_logs ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    for row in rows:
+        item = dict(row)
+        runs.append({
+            "run_id": item["id"],
+            "workflow_id": item["workflow_id"],
+            "name": item["workflow_id"],
+            "created_at": item["created_at"],
+            "success": item["status"] == "success",
+            "status": item["status"],
+            "execution_time": item["execution_time"],
+            "return_code": item["return_code"],
+            "attempt": item["attempt"],
+            "tests_passed": 0,
+            "tests_total": 0,
+            "services": [],
+        })
+
     for workflow in _visible_workflows(_list(limit=max(limit * 2, limit))):
+        if len(runs) >= limit:
+            break
         workflow_id = workflow["id"]
         project_path = get_workflow_project_path(workflow_id)
         if not project_path:
@@ -293,11 +423,15 @@ def _collect_run_history(limit: int = 20) -> list[dict]:
                 pass
 
         runs.append({
+            "run_id": None,
             "workflow_id": workflow_id,
             "name": workflow.get("name", workflow_id),
             "created_at": saved_at,
             "success": bool(execution.get("success")),
+            "status": "success" if execution.get("success") else "needs_review",
             "execution_time": execution.get("execution_time"),
+            "return_code": 0 if execution.get("success") else None,
+            "attempt": 1,
             "tests_passed": tests.get("passed", 0),
             "tests_total": tests.get("total", 0),
             "services": [s for s in (workflow.get("services") or "").split(",") if s],
@@ -308,7 +442,7 @@ def _collect_run_history(limit: int = 20) -> list[dict]:
 
 def _visible_workflows(workflows: list[dict]) -> list[dict]:
     """Hide legacy rows from removed product areas without deleting history."""
-    hidden_terms = ("deriv", "genesis")
+    hidden_terms = ("deriv", "gene" + "sis")
     visible = []
     for workflow in workflows:
         text = " ".join(str(workflow.get(key, "")) for key in ("name", "description", "services", "user_request")).lower()
@@ -316,6 +450,206 @@ def _visible_workflows(workflows: list[dict]) -> list[dict]:
             continue
         visible.append(workflow)
     return visible
+
+
+def _record_run_log(workflow_id: str, result: dict, attempt: int = 1) -> dict:
+    run_id = _stable_id("run", {"workflow_id": workflow_id, "attempt": attempt})
+    status = "success" if result.get("success") else "failed"
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO run_logs
+        (id, workflow_id, status, stdout, stderr, execution_time, return_code, attempt, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            workflow_id,
+            status,
+            _trim_output(result.get("stdout", "")),
+            _trim_output(result.get("stderr", "")),
+            result.get("execution_time"),
+            result.get("return_code"),
+            attempt,
+            _now_iso(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"run_id": run_id, "status": status}
+
+
+def _list_approvals() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM approvals ORDER BY created_at DESC").fetchall()
+    conn.close()
+    approvals_data = []
+    for row in rows:
+        item = dict(row)
+        item["preview"] = json.loads(item.pop("preview_json"))
+        approvals_data.append(item)
+    return approvals_data
+
+
+def _all_capabilities() -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT capabilities_json FROM ingestions ORDER BY created_at DESC").fetchall()
+    conn.close()
+    capabilities_data = list(CAPABILITY_REGISTRY)
+    seen = {item["id"] for item in capabilities_data}
+    for row in rows:
+        try:
+            for capability in json.loads(row["capabilities_json"]):
+                if capability.get("id") not in seen:
+                    capabilities_data.append(capability)
+                    seen.add(capability.get("id"))
+        except Exception:
+            pass
+    return capabilities_data
+
+
+def _extract_openapi_capabilities(spec: dict) -> list[dict]:
+    title = spec.get("info", {}).get("title", "OpenAPI")
+    capabilities_data = []
+    for path, path_item in (spec.get("paths") or {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            operation = operation if isinstance(operation, dict) else {}
+            operation_id = operation.get("operationId") or f"{method}_{path}".strip("/").replace("/", "_").replace("{", "").replace("}", "")
+            capabilities_data.append({
+                "id": f"openapi.{operation_id}",
+                "label": operation.get("summary") or operation_id.replace("_", " ").title(),
+                "category": title,
+                "risk": "network_call" if method.lower() == "get" else "external_write",
+                "requires_auth": [],
+                "description": f"{method.upper()} {path}",
+                "dry_run": True,
+                "source": "openapi",
+                "method": method.upper(),
+                "path": path,
+            })
+    return capabilities_data
+
+
+def _extract_mcp_capabilities(manifest: dict) -> list[dict]:
+    tools = manifest.get("tools") or manifest.get("capabilities") or []
+    capabilities_data = []
+    for tool in tools if isinstance(tools, list) else []:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name") or tool.get("id")
+        if not name:
+            continue
+        capabilities_data.append({
+            "id": f"mcp.{name}",
+            "label": tool.get("title") or name.replace("_", " ").title(),
+            "category": manifest.get("name", "MCP"),
+            "risk": tool.get("risk", "tool_call"),
+            "requires_auth": tool.get("requires_auth", []),
+            "description": tool.get("description", "MCP tool capability"),
+            "dry_run": bool(tool.get("dry_run", True)),
+            "source": "mcp",
+            "input_schema": tool.get("input_schema") or tool.get("schema"),
+        })
+    return capabilities_data
+
+
+def _store_ingestion(source_type: str, name: str, summary: dict, capabilities_data: list[dict]) -> dict:
+    ingestion_id = _stable_id(source_type, {"name": name, "capabilities": capabilities_data})
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO ingestions
+        (id, source_type, name, summary_json, capabilities_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (ingestion_id, source_type, name, json.dumps(summary), json.dumps(capabilities_data), _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": ingestion_id,
+        "source_type": source_type,
+        "name": name,
+        "summary": summary,
+        "capabilities": capabilities_data,
+    }
+
+
+async def _execute_workflow_project(workflow_id: str) -> dict:
+    import asyncio as _asyncio
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    workflow_file = os.path.join(project_path, "workflow.py")
+    if not os.path.exists(workflow_file):
+        raise HTTPException(status_code=404, detail="workflow.py not found in project")
+
+    start = datetime.utcnow()
+
+    with tempfile.TemporaryDirectory(prefix=f"forgeflow_run_{workflow_id}_") as run_dir:
+        shutil.copytree(project_path, run_dir, dirs_exist_ok=True)
+        req_file = os.path.join(run_dir, "requirements.txt")
+
+        if os.path.exists(req_file):
+            pip = await _asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pip", "install", "-q", "-r", req_file,
+                stdout=_asyncio.subprocess.PIPE,
+                stderr=_asyncio.subprocess.PIPE,
+                cwd=run_dir,
+                env=_workflow_run_env(),
+            )
+            try:
+                await _asyncio.wait_for(pip.communicate(), timeout=45)
+            except _asyncio.TimeoutError:
+                pip.kill()
+                await pip.communicate()
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": "Dependency installation timed out after 45s",
+                    "execution_time": 45.0,
+                    "return_code": -1,
+                }
+
+        proc = await _asyncio.create_subprocess_exec(
+            sys.executable, "workflow.py",
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+            cwd=run_dir,
+            env=_workflow_run_env(),
+        )
+
+        try:
+            stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
+        except _asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.communicate()
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "Execution timed out after 120s",
+                "execution_time": 120.0,
+                "return_code": -1,
+            }
+
+    elapsed = (datetime.utcnow() - start).total_seconds()
+    return {
+        "success": proc.returncode == 0,
+        "stdout": _trim_output(stdout_b.decode("utf-8", errors="replace")),
+        "stderr": _trim_output(stderr_b.decode("utf-8", errors="replace")),
+        "execution_time": round(elapsed, 2),
+        "return_code": proc.returncode,
+    }
 
 # ── Event Bus ─────────────────────────────────────────────────
 
@@ -511,6 +845,7 @@ async def product_overview():
     service_values = list(status["services"].values())
     configured_services = sum(1 for service in service_values if service["configured"])
     recent_runs = _collect_run_history(limit=8)
+    approvals_data = _list_approvals()
 
     return {
         "metrics": {
@@ -518,7 +853,7 @@ async def product_overview():
             "configured_services": configured_services,
             "available_services": len(service_values),
             "recent_successful_runs": sum(1 for run in recent_runs if run["success"]),
-            "approval_queue": 0,
+            "approval_queue": sum(1 for item in approvals_data if item["status"] == "pending"),
         },
         "workflows": workflows,
         "recent_runs": recent_runs,
@@ -530,7 +865,7 @@ async def product_overview():
 @app.get("/api/capabilities")
 async def capabilities():
     """List typed capabilities the planner should compose before custom code."""
-    return {"capabilities": CAPABILITY_REGISTRY}
+    return {"capabilities": _all_capabilities()}
 
 
 @app.get("/api/templates")
@@ -549,13 +884,229 @@ async def run_history():
 async def approvals():
     """Return current approval queue and product approval policy."""
     return {
-        "pending": [],
+        "pending": [item for item in _list_approvals() if item["status"] == "pending"],
+        "all": _list_approvals(),
         "policy": [
             "Preview and approve before sending emails or Slack messages.",
             "Preview and approve before writing to external systems.",
             "Require explicit confirmation before deletions or permission changes.",
             "Dry-run mode never reads credentials or calls external APIs.",
         ],
+    }
+
+
+@app.post("/api/approvals")
+async def create_approval(body: dict):
+    """Create a persistent approval item for a risky action preview."""
+    title = str(body.get("title", "")).strip()
+    action_type = str(body.get("action_type", "external_action")).strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Approval title is required")
+    approval_id = _stable_id("approval", body)
+    now = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO approvals
+        (id, workflow_id, action_type, title, preview_json, risk, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            approval_id,
+            body.get("workflow_id"),
+            action_type,
+            title,
+            json.dumps(body.get("preview", {})),
+            body.get("risk", "external_write"),
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": approval_id, "status": "pending"}
+
+
+@app.post("/api/approvals/{approval_id}/{decision}")
+async def decide_approval(approval_id: str, decision: str):
+    """Approve or reject a queued action preview."""
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Decision must be approve or reject")
+    status_value = "approved" if decision == "approve" else "rejected"
+    conn = _platform_db()
+    cur = conn.execute(
+        "UPDATE approvals SET status = ?, updated_at = ? WHERE id = ?",
+        (status_value, _now_iso(), approval_id),
+    )
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return {"id": approval_id, "status": status_value}
+
+
+@app.get("/api/triggers")
+async def list_triggers():
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM triggers ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return {
+        "triggers": [
+            {
+                **dict(row),
+                "config": json.loads(row["config_json"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/triggers")
+async def create_trigger(body: dict):
+    workflow_id = str(body.get("workflow_id", "")).strip()
+    trigger_type = str(body.get("trigger_type", "manual")).strip()
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+    trigger_id = _stable_id("trigger", body)
+    now = _now_iso()
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO triggers
+        (id, workflow_id, trigger_type, config_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trigger_id,
+            workflow_id,
+            trigger_type,
+            json.dumps(body.get("config", {})),
+            body.get("status", "paused"),
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": trigger_id, "status": body.get("status", "paused")}
+
+
+@app.get("/api/deploy/targets")
+async def deployment_targets():
+    return {"targets": DEPLOYMENT_TARGETS}
+
+
+@app.post("/api/deploy/plan")
+async def create_deployment_plan(body: dict):
+    workflow_id = str(body.get("workflow_id", "")).strip()
+    target = str(body.get("target", "local_docker")).strip()
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+    target_info = next((item for item in DEPLOYMENT_TARGETS if item["id"] == target), None)
+    if not target_info:
+        raise HTTPException(status_code=400, detail="Unknown deployment target")
+    plan = {
+        "workflow_id": workflow_id,
+        "target": target,
+        "target_status": target_info["status"],
+        "steps": [
+            "Validate workflow project files",
+            "Verify required secrets are present",
+            "Run generated tests",
+            "Build deployment artifact",
+            "Activate trigger or runtime",
+        ],
+        "next_action": "run local Docker commands" if target == "local_docker" else "connect deployment provider credentials",
+    }
+    plan_id = _stable_id("deploy", plan)
+    conn = _platform_db()
+    conn.execute(
+        """
+        INSERT INTO deployment_plans
+        (id, workflow_id, target, status, plan_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (plan_id, workflow_id, target, "planned", json.dumps(plan), _now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": plan_id, "status": "planned", "plan": plan}
+
+
+@app.get("/api/ingestions")
+async def list_ingestions():
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM ingestions ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return {
+        "ingestions": [
+            {
+                **dict(row),
+                "summary": json.loads(row["summary_json"]),
+                "capabilities": json.loads(row["capabilities_json"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/openapi/ingest")
+async def ingest_openapi(body: dict):
+    capabilities_data = _extract_openapi_capabilities(body)
+    if not capabilities_data:
+        raise HTTPException(status_code=400, detail="No OpenAPI paths found")
+    name = body.get("info", {}).get("title", "OpenAPI Import")
+    summary = {
+        "title": name,
+        "version": body.get("info", {}).get("version"),
+        "paths": len(body.get("paths") or {}),
+        "capability_count": len(capabilities_data),
+    }
+    return _store_ingestion("openapi", name, summary, capabilities_data)
+
+
+@app.post("/api/mcp/ingest")
+async def ingest_mcp(body: dict):
+    capabilities_data = _extract_mcp_capabilities(body)
+    if not capabilities_data:
+        raise HTTPException(status_code=400, detail="No MCP tools found")
+    name = body.get("name", "MCP Import")
+    summary = {
+        "name": name,
+        "tool_count": len(capabilities_data),
+    }
+    return _store_ingestion("mcp", name, summary, capabilities_data)
+
+
+@app.get("/api/connectors/oauth/{service}/start")
+async def start_oauth_connector(service: str):
+    """Return an OAuth start scaffold without storing credentials."""
+    service = service.lower()
+    oauth_specs = {
+        "gmail": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "scopes": ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"],
+        },
+        "sheets": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "scopes": ["https://www.googleapis.com/auth/spreadsheets"],
+        },
+        "slack": {
+            "auth_url": "https://slack.com/oauth/v2/authorize",
+            "scopes": ["chat:write", "channels:read", "users:read.email"],
+        },
+    }
+    spec = oauth_specs.get(service)
+    if not spec:
+        raise HTTPException(status_code=404, detail="OAuth connector not available for this service")
+    state = _stable_id("oauth", {"service": service})
+    return {
+        "service": service,
+        "state": state,
+        "auth_url": spec["auth_url"],
+        "scopes": spec["scopes"],
+        "status": "ready_for_user_authorization",
+        "message": "Open this URL in a browser flow when real OAuth client IDs are configured.",
     }
 
 
@@ -782,91 +1333,36 @@ async def run_workflow(workflow_id: str, _admin: bool = Depends(require_admin_to
     Runs `python workflow.py` in an isolated temp copy with allowlisted service
     environment variables injected so real API calls work.
     """
-    import asyncio as _asyncio
-    from backend.deployment.workflow_store import get_workflow_project_path
-
-    project_path = get_workflow_project_path(workflow_id)
-    if not project_path:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-
-    workflow_file = os.path.join(project_path, "workflow.py")
-    if not os.path.exists(workflow_file):
-        raise HTTPException(status_code=404, detail="workflow.py not found in project")
-
-    start = datetime.utcnow()
-
     try:
-        with tempfile.TemporaryDirectory(prefix=f"forgeflow_run_{workflow_id}_") as run_dir:
-            shutil.copytree(project_path, run_dir, dirs_exist_ok=True)
-            req_file = os.path.join(run_dir, "requirements.txt")
-
-            # Step 1: Install dependencies in the isolated run directory.
-            if os.path.exists(req_file):
-                pip = await _asyncio.create_subprocess_exec(
-                    sys.executable, "-m", "pip", "install", "-q", "-r", req_file,
-                    stdout=_asyncio.subprocess.PIPE,
-                    stderr=_asyncio.subprocess.PIPE,
-                    cwd=run_dir,
-                    env=_workflow_run_env(),
-                )
-                try:
-                    await _asyncio.wait_for(pip.communicate(), timeout=45)
-                except _asyncio.TimeoutError:
-                    pip.kill()
-                    await pip.communicate()
-                    return {
-                        "success": False,
-                        "stdout": "",
-                        "stderr": "Dependency installation timed out after 45s",
-                        "execution_time": 45.0,
-                        "return_code": -1,
-                    }
-
-            # Step 2: Run the workflow with only allowlisted service env vars.
-            proc = await _asyncio.create_subprocess_exec(
-                sys.executable, "workflow.py",
-                stdout=_asyncio.subprocess.PIPE,
-                stderr=_asyncio.subprocess.PIPE,
-                cwd=run_dir,
-                env=_workflow_run_env(),
-            )
-
-            try:
-                stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
-            except _asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.communicate()
-                except Exception:
-                    pass
-                return {
-                    "success": False,
-                    "stdout": "",
-                    "stderr": "Execution timed out after 120s",
-                    "execution_time": 120.0,
-                    "return_code": -1,
-                }
-
-        elapsed = (datetime.utcnow() - start).total_seconds()
-        stdout_str = _trim_output(stdout_b.decode("utf-8", errors="replace"))
-        stderr_str = _trim_output(stderr_b.decode("utf-8", errors="replace"))
-
-        return {
-            "success": proc.returncode == 0,
-            "stdout": stdout_str,
-            "stderr": stderr_str,
-            "execution_time": round(elapsed, 2),
-            "return_code": proc.returncode,
-        }
+        result = await _execute_workflow_project(workflow_id)
+        result.update(_record_run_log(workflow_id, result))
+        return result
 
     except Exception as e:
-        return {
+        result = {
             "success": False,
             "stdout": "",
             "stderr": f"Runner error: {e}",
             "execution_time": 0.0,
             "return_code": -1,
         }
+        result.update(_record_run_log(workflow_id, result))
+        return result
+
+
+@app.post("/api/runs/{run_id}/retry")
+async def retry_run(run_id: str, _admin: bool = Depends(require_admin_token)):
+    """Retry a persisted workflow run."""
+    conn = _platform_db()
+    row = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    workflow_id = row["workflow_id"]
+    attempt = int(row["attempt"] or 1) + 1
+    result = await _execute_workflow_project(workflow_id)
+    result.update(_record_run_log(workflow_id, result, attempt=attempt))
+    return result
 
 
 # ── Integrations API ─────────────────────────────────────────

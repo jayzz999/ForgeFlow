@@ -494,3 +494,96 @@ async def test_dry_run_codegen_stays_single_file(monkeypatch):
     assert extra_files == {}
     assert "DRY RUN MODE: true" in captured["prompt"]
     assert "SINGLE-FILE" in captured["prompt"]
+
+
+def test_openapi_ingestion_extracts_grounded_capabilities():
+    from backend import main
+
+    capabilities = main._extract_openapi_capabilities({
+        "openapi": "3.0.0",
+        "info": {"title": "HR Platform", "version": "1.0"},
+        "paths": {
+            "/candidates": {"get": {"operationId": "listCandidates", "summary": "List candidates"}},
+            "/employees": {"post": {"operationId": "createEmployee", "summary": "Create employee"}},
+        },
+    })
+
+    assert [item["id"] for item in capabilities] == ["openapi.listCandidates", "openapi.createEmployee"]
+    assert capabilities[0]["risk"] == "network_call"
+    assert capabilities[1]["risk"] == "external_write"
+    assert capabilities[1]["description"] == "POST /employees"
+
+
+def test_mcp_ingestion_extracts_tools():
+    from backend import main
+
+    capabilities = main._extract_mcp_capabilities({
+        "name": "hr-records-mcp",
+        "tools": [
+            {
+                "name": "lookup_employee",
+                "description": "Find an employee by email",
+                "input_schema": {"email": "string"},
+            }
+        ],
+    })
+
+    assert capabilities == [
+        {
+            "id": "mcp.lookup_employee",
+            "label": "Lookup Employee",
+            "category": "hr-records-mcp",
+            "risk": "tool_call",
+            "requires_auth": [],
+            "description": "Find an employee by email",
+            "dry_run": True,
+            "source": "mcp",
+            "input_schema": {"email": "string"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persistent_approval_queue_roundtrip(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    created = await main.create_approval({
+        "title": "Send Slack announcement",
+        "workflow_id": "workflow_hr",
+        "action_type": "slack.postMessage",
+        "risk": "external_write",
+        "preview": {"channel": "#hr", "text": "Welcome"},
+    })
+    queue = await main.approvals()
+
+    assert created["status"] == "pending"
+    assert queue["pending"][0]["title"] == "Send Slack announcement"
+    assert queue["pending"][0]["preview"] == {"channel": "#hr", "text": "Welcome"}
+
+    decided = await main.decide_approval(created["id"], "approve")
+    queue = await main.approvals()
+
+    assert decided["status"] == "approved"
+    assert queue["pending"] == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_and_deployment_plan_are_persisted(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+
+    trigger = await main.create_trigger({
+        "workflow_id": "workflow_hr",
+        "trigger_type": "webhook",
+        "config": {"path": "/webhooks/hr"},
+    })
+    triggers = await main.list_triggers()
+    plan = await main.create_deployment_plan({"workflow_id": "workflow_hr", "target": "local_docker"})
+
+    assert trigger["status"] == "paused"
+    assert triggers["triggers"][0]["config"] == {"path": "/webhooks/hr"}
+    assert plan["status"] == "planned"
+    assert plan["plan"]["steps"][-1] == "Activate trigger or runtime"

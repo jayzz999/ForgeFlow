@@ -37,7 +37,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# Local Claude settings (may contain credentials)
+# Local assistant settings (may contain credentials)
 .claude/settings.local.json
 
 # Generated workflows (keep structure, ignore generated files)
@@ -47,7 +47,7 @@ workflows/*/
 /tmp/
 *.log
 
-# Genesis runtime data (organisms persist locally; not source)
+# Legacy runtime data (persists locally; not source)
 organisms/
 !organisms/_skill_pool/.gitkeep
 !organisms/_mcp_global.json
