@@ -397,6 +397,55 @@ async def test_dry_run_test_generation_is_deterministic():
     assert "generate_text" not in test_code
 
 
+def test_schema_inspector_maps_csv_columns():
+    from backend.main import _inspect_tabular_bytes
+
+    payload = (
+        "Employee Name,Joining Date,Department,Reporting Manager,Personal Email\n"
+        "Alex Rivera,2026-05-15,Product,Priya Shah,alex@example.com\n"
+    ).encode()
+
+    schema = _inspect_tabular_bytes("new_hires.csv", payload)
+
+    assert schema["columns"] == [
+        "Employee Name",
+        "Joining Date",
+        "Department",
+        "Reporting Manager",
+        "Personal Email",
+    ]
+    assert schema["sample_rows"][0]["Employee Name"] == "Alex Rivera"
+    assert schema["mapping_suggestions"]["person_name"] == "Employee Name"
+    assert schema["mapping_suggestions"]["start_date"] == "Joining Date"
+    assert schema["mapping_suggestions"]["manager"] == "Reporting Manager"
+    assert schema["mapping_suggestions"]["email"] == "Personal Email"
+
+
+@pytest.mark.asyncio
+async def test_preflight_identifies_schema_and_missing_credentials(monkeypatch):
+    from backend import main
+
+    async def fake_provider_status():
+        return {
+            "services": {
+                "slack": {"name": "Slack", "configured": False, "required_env": ["SLACK_BOT_TOKEN"]},
+                "gmail": {"name": "Gmail", "configured": True, "required_env": ["GMAIL_ACCESS_TOKEN"]},
+                "sheets": {"name": "Google Sheets", "configured": False, "required_env": ["GOOGLE_SHEETS_ACCESS_TOKEN"]},
+                "http": {"name": "HTTP", "configured": True, "required_env": []},
+            }
+        }
+
+    monkeypatch.setattr(main, "provider_status", fake_provider_status)
+
+    result = await main.preflight_prompt({
+        "prompt": "Automate HR onboarding from an Excel sheet and post to Slack",
+    })
+
+    assert result["schema_needed"] is True
+    assert {item["service"] for item in result["missing_credentials"]} == {"slack", "sheets"}
+    assert "schema_required_to_avoid_hallucinated_fields" in result["risks"]
+
+
 @pytest.mark.asyncio
 async def test_dry_run_codegen_stays_single_file(monkeypatch):
     from backend.codegen import generator
