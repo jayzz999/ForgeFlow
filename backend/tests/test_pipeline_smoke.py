@@ -319,3 +319,129 @@ async def test_http_fallback_codegen_is_runnable_code(monkeypatch):
     assert '"latency_ms": latency_ms' in code
     assert '"status_code": response.status_code' in code
     assert "asyncio.run(main())" in code
+
+
+def test_codegen_detects_dry_run_workflows():
+    from backend.codegen.generator import _is_dry_run_workflow
+
+    dag = WorkflowDAG(
+        id="hr",
+        name="HR Onboarding Dry Run",
+        description="Draft messages locally without sending or calling external APIs",
+        trigger={"type": "manual"},
+        steps=[
+            WorkflowStep(
+                id="step_1",
+                name="Draft Slack announcement",
+                description="Draft without posting to Slack",
+            )
+        ],
+    )
+
+    assert _is_dry_run_workflow(dag) is True
+
+
+def test_generated_tests_import_workflow_module():
+    from backend.codegen.test_generator import _normalize_generated_test_imports
+
+    test_code = "import __main__ as workflow_module  # generated mistake\n\n"
+
+    assert _normalize_generated_test_imports(test_code) == "import workflow as workflow_module\n\n"
+
+
+def test_test_support_files_are_materialized(tmp_path):
+    from backend.codegen.test_generator import materialize_extra_files
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    materialize_extra_files(
+        str(project_dir),
+        {"clients/slack_client.py": "class SlackClient:\n    pass\n"},
+    )
+
+    assert (project_dir / "clients" / "__init__.py").exists()
+    assert (project_dir / "clients" / "slack_client.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_test_generation_is_deterministic():
+    from backend.codegen.test_generator import generate_tests
+
+    dag = WorkflowDAG(
+        id="hr",
+        name="HR Dry Run",
+        description="Draft onboarding messages locally as a dry run without external APIs",
+        trigger={"type": "manual"},
+        steps=[
+            WorkflowStep(
+                id="step_1",
+                name="Draft welcome email",
+                description="Draft welcome email without sending",
+            )
+        ],
+    )
+    code = (
+        "async def step_1_draft_welcome_email(context):\n"
+        "    context['step_1'] = {'ok': True}\n\n"
+        "async def main():\n"
+        "    context = {}\n"
+        "    await step_1_draft_welcome_email(context)\n"
+        "    print('ok')\n"
+    )
+
+    test_code = await generate_tests(dag, code)
+
+    assert "import workflow as workflow_module" in test_code
+    assert "test_dry_run_does_not_require_credentials_or_network_clients" in test_code
+    assert "generate_text" not in test_code
+
+
+@pytest.mark.asyncio
+async def test_dry_run_codegen_stays_single_file(monkeypatch):
+    from backend.codegen import generator
+
+    captured = {}
+
+    async def fake_generate_with_tools(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return (
+            "import asyncio\n\n"
+            "async def main():\n"
+            "    print({'ok': True})\n\n"
+            "if __name__ == '__main__':\n"
+            "    asyncio.run(main())\n",
+            {},
+        )
+
+    monkeypatch.setattr(generator, "generate_with_tools", fake_generate_with_tools)
+
+    dag = WorkflowDAG(
+        id="hr",
+        name="HR Onboarding Dry Run",
+        description="Draft messages locally without sending or calling external APIs",
+        trigger={"type": "manual"},
+        steps=[
+            WorkflowStep(
+                id="step_1",
+                name="Draft welcome email",
+                description="Draft welcome email without sending",
+            ),
+            WorkflowStep(
+                id="step_2",
+                name="Draft Slack announcement",
+                description="Draft Slack announcement without posting",
+            ),
+            WorkflowStep(
+                id="step_3",
+                name="Append local tracking record",
+                description="Append local in-memory tracking record",
+            ),
+        ],
+    )
+
+    _code, extra_files = await generator.generate_workflow_code(dag, [])
+
+    assert extra_files == {}
+    assert "DRY RUN MODE: true" in captured["prompt"]
+    assert "SINGLE-FILE" in captured["prompt"]

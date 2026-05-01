@@ -21,6 +21,32 @@ from backend.tools.executor import execute_tool
 logger = logging.getLogger("forgeflow.codegen")
 
 
+def _is_dry_run_workflow(dag: WorkflowDAG) -> bool:
+    """Detect workflows that explicitly request local-only dry-run behavior."""
+    text = " ".join(
+        [
+            dag.name or "",
+            dag.description or "",
+            json.dumps(dag.trigger),
+            " ".join(step.name + " " + step.description + " " + json.dumps(step.inputs) for step in dag.steps),
+        ]
+    ).lower()
+    dry_run_terms = (
+        "dry-run",
+        "dry run",
+        "without sending",
+        "without posting",
+        "without writing",
+        "do not send",
+        "do not post",
+        "do not write",
+        "do not call external",
+        "no external calls",
+        "local in-memory",
+    )
+    return any(term in text for term in dry_run_terms)
+
+
 def _get_available_credentials() -> list[dict]:
     """Check which service credentials are actually configured."""
     creds = []
@@ -103,6 +129,8 @@ async def generate_workflow_code(
         (main_code, extra_files) where extra_files is a dict of
         {relative_path: content} for multi-file projects.
     """
+    dry_run = _is_dry_run_workflow(dag)
+
     # Build a detailed description of each step
     steps_desc = []
     steps_needing_research = []
@@ -125,16 +153,27 @@ async def generate_workflow_code(
                 "auth_type": step.api.auth_type.value,
                 "parameters": step.api.parameters,
             }
+            if dry_run:
+                step_info["dry_run_instruction"] = (
+                    "This workflow is explicitly dry-run/local-only. Do not call this API, "
+                    "do not require credentials, and generate a local draft payload instead."
+                )
         else:
             # Mark steps that need research
-            step_info["research_required"] = True
+            step_info["research_required"] = not dry_run
             step_info["api_hint"] = step.inputs.get("api_hint", {})
-            step_info["note"] = (
-                "NO PRE-INDEXED API. You MUST use fetch_web_page to research "
-                "this service's API and generate REAL integration code. "
-                "NEVER generate placeholder/stub code for this step."
-            )
-            steps_needing_research.append(step.name)
+            if dry_run:
+                step_info["note"] = (
+                    "Dry-run/local-only step. Implement with local Python data structures. "
+                    "Do not browse API docs, call external services, or check credentials."
+                )
+            else:
+                step_info["note"] = (
+                    "NO PRE-INDEXED API. You MUST use fetch_web_page to research "
+                    "this service's API and generate REAL integration code. "
+                    "NEVER generate placeholder/stub code for this step."
+                )
+                steps_needing_research.append(step.name)
 
         step_info["inputs"] = step.inputs
         step_info["outputs"] = step.outputs
@@ -146,9 +185,9 @@ async def generate_workflow_code(
     # Determine complexity for multi-file decision
     num_steps = len(dag.steps)
     num_services = len({s.api.service for s in dag.steps if s.api})
-    is_complex = num_steps >= 3 or num_services >= 2
+    is_complex = (num_steps >= 3 or num_services >= 2) and not dry_run
 
-    system = _build_system_prompt(is_complex)
+    system = _build_system_prompt(is_complex, dry_run=dry_run)
 
     # Check which credentials are actually available
     available_creds = _get_available_credentials()
@@ -162,6 +201,10 @@ async def generate_workflow_code(
         f"PARALLEL GROUPS: {json.dumps(parallel_groups)}\n\n"
         f"ENVIRONMENT VARS: {json.dumps(dag.environment_vars)}\n\n"
         f"AVAILABLE CREDENTIALS:\n{json.dumps(available_creds, indent=2)}\n\n"
+        f"DRY RUN MODE: {json.dumps(dry_run)}\n"
+        f"If DRY RUN MODE is true, every step must execute locally and succeed without credentials. "
+        f"Draft emails/messages/records as plain Python dictionaries or strings, print them as JSON, "
+        f"and do not read service env vars or call external service APIs.\n\n"
         f"IMPORTANT: Only services marked 'available: true' have real credentials configured.\n"
         f"For services WITHOUT credentials, still generate the integration code but:\n"
         f"  - Read credentials from env vars (os.getenv)\n"
@@ -172,7 +215,7 @@ async def generate_workflow_code(
     )
 
     # Add explicit research instruction when steps lack APIs
-    if steps_needing_research:
+    if steps_needing_research and not dry_run:
         prompt += (
             f"⚠️ CRITICAL: {len(steps_needing_research)} steps have NO pre-indexed API.\n"
             f"Steps needing research: {steps_needing_research}\n"
@@ -463,7 +506,7 @@ if __name__ == "__main__":
     return code
 
 
-def _build_system_prompt(is_complex: bool) -> str:
+def _build_system_prompt(is_complex: bool, dry_run: bool = False) -> str:
     """Build the system prompt for code generation."""
     base = """You are ForgeFlow's AI code generation agent. You generate PRODUCTION-QUALITY,
 ACTUALLY WORKING Python code for workflow automations.
@@ -662,6 +705,20 @@ async def http_webhook(url: str, payload: dict) -> dict:
 DATA FLOW: Use a shared `context: dict` to pass data between steps. Each step reads from and writes to context.
 
 OUTPUT: Return ONLY the complete Python code for workflow.py. No markdown fences. No explanations. No comments about what you would do — just the code."""
+
+    if dry_run:
+        base += """
+
+DRY-RUN / LOCAL-ONLY MODE IS ACTIVE:
+The user's workflow explicitly says dry-run, local-only, draft-only, or no external calls.
+This overrides service integration patterns above.
+- Do NOT read API credentials from environment variables.
+- Do NOT call Slack, Gmail, Google Sheets, webhooks, or any external service API.
+- Do NOT skip or fail a draft step because credentials are missing.
+- Generate local Python dictionaries/strings for emails, Slack messages, tracking rows, tickets, and approvals.
+- Every dry-run draft step should return {"ok": True, "outputs": {...}}.
+- Print the final combined draft/review payload as JSON.
+"""
 
     if is_complex:
         base += """

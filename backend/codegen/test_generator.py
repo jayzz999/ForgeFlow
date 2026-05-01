@@ -10,6 +10,9 @@ Given a workflow DAG and generated code, produces a test file that validates:
 
 import json
 import logging
+import os
+from pathlib import Path
+import re
 
 from backend.shared.config import settings
 from backend.shared.llm_client import generate_text
@@ -63,6 +66,9 @@ async def generate_tests(
         for path, content in extra_files.items():
             extra_files_info += f"\n--- {path} ---\n{content[:500]}\n"
 
+    if _is_dry_run_workflow(dag):
+        return _dry_run_tests(dag, code)
+
     system = """You are a Python test engineer. Generate comprehensive pytest test cases for workflow automation code.
 
 RULES:
@@ -76,6 +82,8 @@ RULES:
 8. Include both positive (happy path) and negative (error) test cases
 9. Mock httpx.AsyncClient using pytest-httpx or unittest.mock.AsyncMock
 10. Use @pytest.mark.asyncio for async tests
+11. Import the generated workflow with `import workflow as workflow_module`
+12. Never import `__main__`; tests run beside workflow.py as a module
 
 STRUCTURE:
 - Fixtures: mock clients, env vars, sample data
@@ -122,6 +130,8 @@ OUTPUT: Return ONLY the complete Python test file. No markdown. No explanations.
             lines = lines[:-1]
         test_code = "\n".join(lines)
 
+    test_code = _normalize_generated_test_imports(test_code)
+
     return test_code
 
 
@@ -136,8 +146,6 @@ async def run_tests(test_code: str, project_dir: str) -> dict:
         Dict with: passed, failed, errors, output, total
     """
     import asyncio
-    import os
-    import tempfile
 
     # Write test file
     test_path = os.path.join(project_dir, "test_workflow.py")
@@ -197,6 +205,135 @@ async def run_tests(test_code: str, project_dir: str) -> dict:
             "output": f"Failed to run tests: {str(e)}",
             "success": False,
         }
+
+
+def materialize_extra_files(project_dir: str, extra_files: dict[str, str] | None) -> None:
+    """Write generated support files beside workflow.py for pytest imports."""
+    if not extra_files:
+        return
+
+    base = Path(project_dir).resolve()
+    for relative_path, content in extra_files.items():
+        destination = (base / relative_path).resolve()
+        if base not in destination.parents and destination != base:
+            logger.warning("Skipping test support file outside project dir: %s", relative_path)
+            continue
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        current = destination.parent
+        while current != base and base in current.parents:
+            init_file = current / "__init__.py"
+            if not init_file.exists():
+                init_file.write_text("", encoding="utf-8")
+            current = current.parent
+
+        destination.write_text(content, encoding="utf-8")
+
+
+def _normalize_generated_test_imports(test_code: str) -> str:
+    """Keep LLM-generated tests pointed at the generated workflow module."""
+    normalized = re.sub(
+        r"^import\s+__main__\s+as\s+workflow_module\s*(?:#.*)?$",
+        "import workflow as workflow_module",
+        test_code,
+        flags=re.MULTILINE,
+    )
+    normalized = re.sub(
+        r"^from\s+__main__\s+import\s+(.+)$",
+        r"from workflow import \1",
+        normalized,
+        flags=re.MULTILINE,
+    )
+
+    if "workflow_module" in normalized and "import workflow as workflow_module" not in normalized:
+        normalized = "import workflow as workflow_module\n" + normalized
+
+    return normalized
+
+
+def _is_dry_run_workflow(dag: WorkflowDAG) -> bool:
+    text = " ".join(
+        [
+            dag.name,
+            dag.description,
+            *(step.name for step in dag.steps),
+            *(step.description for step in dag.steps),
+        ]
+    ).lower()
+
+    dry_markers = ("dry run", "dry-run", "without sending", "without posting", "without external")
+    return any(marker in text for marker in dry_markers)
+
+
+def _dry_run_tests(dag: WorkflowDAG, code: str) -> str:
+    """Generate deterministic smoke tests for local-only dry-run workflows."""
+    function_names = re.findall(r"^async def (step_\d+_[a-zA-Z0-9_]+)\(", code, flags=re.MULTILINE)
+    ordered_functions = []
+
+    for step in dag.steps:
+        prefix = f"{step.id}_"
+        match = next((name for name in function_names if name.startswith(prefix)), None)
+        if match:
+            ordered_functions.append((step.id, match))
+
+    function_list = repr(ordered_functions)
+
+    return f"""# Auto-generated dry-run tests by ForgeFlow
+# Tests for: {dag.name}
+
+import inspect
+
+import pytest
+
+import workflow as workflow_module
+
+
+STEP_FUNCTIONS = {function_list}
+
+
+def test_workflow_code_compiles():
+    code = open("workflow.py", encoding="utf-8").read()
+    compile(code, "workflow.py", "exec")
+
+
+def test_dry_run_does_not_require_credentials_or_network_clients():
+    code = open("workflow.py", encoding="utf-8").read()
+    blocked_tokens = [
+        "os.getenv(",
+        "os.environ",
+        "httpx.",
+        "requests.",
+        "smtplib",
+        "googleapiclient",
+        "slack_sdk",
+        "WebClient(",
+    ]
+    assert not any(token in code for token in blocked_tokens)
+
+
+@pytest.mark.asyncio
+async def test_step_functions_complete_successfully():
+    assert STEP_FUNCTIONS
+    context = {{}}
+
+    for step_id, function_name in STEP_FUNCTIONS:
+        function = getattr(workflow_module, function_name)
+        if inspect.signature(function).parameters:
+            await function(context)
+        else:
+            await function()
+
+        assert step_id in context
+        assert context[step_id]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_main_runs_end_to_end(capsys):
+    await workflow_module.main()
+    captured = capsys.readouterr()
+    assert captured.out.strip()
+"""
 
 
 def _fallback_tests(dag: WorkflowDAG, code: str, services: set) -> str:

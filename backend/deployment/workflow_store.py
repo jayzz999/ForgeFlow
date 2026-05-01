@@ -380,7 +380,13 @@ clean:
             if normalized.startswith("..") or os.path.isabs(normalized):
                 continue  # Skip unsafe paths
             full_path = os.path.join(project_dir, normalized)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            parent = os.path.dirname(full_path)
+            os.makedirs(parent, exist_ok=True)
+            if parent != project_dir and normalized.endswith(".py"):
+                init_file = os.path.join(parent, "__init__.py")
+                if not os.path.exists(init_file):
+                    with open(init_file, "w") as init:
+                        init.write("")
             with open(full_path, "w") as f:
                 f.write(content)
             extra_file_names.append(normalized)

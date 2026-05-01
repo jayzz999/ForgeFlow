@@ -138,7 +138,13 @@ async def execute_code_docker(
         if extra_files:
             for fpath, fcontent in extra_files.items():
                 full = os.path.join(tmpdir, fpath)
-                os.makedirs(os.path.dirname(full), exist_ok=True)
+                parent = os.path.dirname(full)
+                os.makedirs(parent, exist_ok=True)
+                if parent != tmpdir and fpath.endswith(".py"):
+                    init_file = os.path.join(parent, "__init__.py")
+                    if not os.path.exists(init_file):
+                        with open(init_file, "w") as init:
+                            init.write("")
                 with open(full, "w") as ef:
                     ef.write(fcontent)
 

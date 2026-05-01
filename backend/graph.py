@@ -367,7 +367,7 @@ async def security_review_node(state: ForgeFlowState) -> dict:
 
 async def test_generation_node(state: ForgeFlowState) -> dict:
     """Auto-generate and run pytest test cases for the workflow."""
-    from backend.codegen.test_generator import generate_tests, run_tests
+    from backend.codegen.test_generator import generate_tests, materialize_extra_files, run_tests
 
     await _emit(state, "testing.started", "Generating test cases...")
 
@@ -394,6 +394,7 @@ async def test_generation_node(state: ForgeFlowState) -> dict:
     workflow_path = os.path.join(project_dir, "workflow.py")
     with open(workflow_path, "w") as f:
         f.write(code)
+    materialize_extra_files(project_dir, extra_files)
 
     test_results = await run_tests(test_code, project_dir)
 
@@ -551,10 +552,18 @@ async def present_to_user_node(state: ForgeFlowState) -> dict:
     debug_attempts = state.get("debug_attempts", 0)
     test_results = state.get("test_results", {})
 
+    tests_passed = bool(test_results.get("success"))
+
     if success:
-        msg = "✅ Workflow generated, tested, and ready for approval!"
+        if tests_passed:
+            msg = "✅ Workflow generated, tested, and ready for approval!"
+        else:
+            msg = "✅ Workflow executed successfully, but generated tests need review before approval."
         if debug_attempts > 0:
-            msg = f"✅ Workflow self-debugged ({debug_attempts} fix{'es' if debug_attempts > 1 else ''}) — ready for approval!"
+            if tests_passed:
+                msg = f"✅ Workflow self-debugged ({debug_attempts} fix{'es' if debug_attempts > 1 else ''}) — tested and ready for approval!"
+            else:
+                msg = f"✅ Workflow self-debugged ({debug_attempts} fix{'es' if debug_attempts > 1 else ''}) and executed, but generated tests need review."
     else:
         msg = f"⚠️ Workflow generated but had issues after {debug_attempts} attempts. Review before deploying."
 
