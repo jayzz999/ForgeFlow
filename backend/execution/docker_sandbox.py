@@ -40,19 +40,40 @@ _PIP_MAP = {
 }
 
 
-def _extract_requirements_for_sandbox(code: str) -> str:
-    """Extract pip-installable packages from import statements."""
+def _extract_requirements_for_sandbox(
+    code: str,
+    extra_files: dict[str, str] | None = None,
+) -> str:
+    """Extract pip-installable packages from import statements.
+
+    Generated workflows can import sibling helper files such as
+    ``slack_client.py``. Those are local modules, not pip packages, but their
+    imports still need to be scanned for real dependencies.
+    """
+    local_modules: set[str] = set()
+    combined_sources = [code]
+    if extra_files:
+        for path, content in extra_files.items():
+            normalized = path.replace("\\", "/").strip("/")
+            if normalized.endswith(".py"):
+                parts = normalized.split("/")
+                local_modules.add(parts[0].removesuffix(".py"))
+                local_modules.add(parts[-1].removesuffix(".py"))
+                combined_sources.append(content)
+
     imports: set[str] = set()
-    for line in code.split("\n"):
-        line = line.strip()
-        if line.startswith("import "):
-            imports.add(line.split()[1].split(".")[0])
-        elif line.startswith("from "):
-            imports.add(line.split()[1].split(".")[0])
+    for source in combined_sources:
+        for line in source.split("\n"):
+            line = line.strip()
+            if line.startswith("import "):
+                for item in line.removeprefix("import ").split(","):
+                    imports.add(item.strip().split()[0].split(".")[0])
+            elif line.startswith("from "):
+                imports.add(line.split()[1].split(".")[0])
 
     deps = []
     for mod in sorted(imports):
-        if mod in _STDLIB or mod.startswith("_"):
+        if mod in _STDLIB or mod in local_modules or mod.startswith("_"):
             continue
         deps.append(_PIP_MAP.get(mod, mod))
 
@@ -149,7 +170,7 @@ async def execute_code_docker(
                     ef.write(fcontent)
 
         # Generate requirements.txt from code imports (sandbox runs before deploy)
-        req_content = _extract_requirements_for_sandbox(code)
+        req_content = _extract_requirements_for_sandbox(code, extra_files)
         req_file = os.path.join(tmpdir, "requirements.txt")
         with open(req_file, "w") as rf:
             rf.write(req_content)

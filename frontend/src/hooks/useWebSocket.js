@@ -186,9 +186,11 @@ export function useWebSocket() {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
 
+    intentionalClose.current = false
     const ws = new WebSocket(`${WS_URL}/ws/${clientId.current}`)
 
     ws.onopen = () => {
+      if (wsRef.current !== ws) return
       setConnected(true)
       reconnectAttempts.current = 0
       console.log('[WS] Connected')
@@ -200,6 +202,7 @@ export function useWebSocket() {
     }
 
     ws.onclose = () => {
+      if (wsRef.current !== ws) return
       setConnected(false)
       console.log('[WS] Disconnected')
 
@@ -224,6 +227,7 @@ export function useWebSocket() {
     }
 
     ws.onerror = (err) => {
+      if (wsRef.current !== ws) return
       console.error('[WS] Error:', err)
     }
 

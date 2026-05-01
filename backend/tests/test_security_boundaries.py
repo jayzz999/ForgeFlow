@@ -45,6 +45,28 @@ def test_ast_fallback_does_not_report_execution_success():
     assert "VALIDATION ONLY" in result.stdout
 
 
+def test_docker_sandbox_requirements_ignore_local_helper_modules():
+    from backend.execution.docker_sandbox import _extract_requirements_for_sandbox
+
+    requirements = _extract_requirements_for_sandbox(
+        "from slack_client import send_message\n"
+        "from clients.order_api_client import get_order_status\n"
+        "from sheets_client import append_row\n",
+        {
+            "slack_client.py": "import httpx, os\n",
+            "clients/order_api_client.py": "import httpx\nfrom pydantic import BaseModel\n",
+            "sheets_client.py": "import requests\n",
+        },
+    )
+
+    assert "httpx>=0.26.0" in requirements
+    assert "requests>=2.31.0" in requirements
+    assert "pydantic>=2.0.0" in requirements
+    assert "slack_client" not in requirements
+    assert "order_api_client" not in requirements
+    assert "sheets_client" not in requirements
+
+
 def test_workflow_run_env_excludes_llm_keys(monkeypatch):
     from backend.main import _workflow_run_env
 
