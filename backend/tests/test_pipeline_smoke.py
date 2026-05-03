@@ -661,6 +661,31 @@ async def test_preflight_uses_imported_openapi_capabilities(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_autopilot_returns_readiness_packet(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setattr(main, "_search_public_api_directory", lambda prompt, limit=8: [])
+
+    result = await main._run_prompt_autopilot(
+        "Post a Slack message when a support ticket is created",
+        platforms=["forgeflow", "n8n"],
+    )
+
+    assert result["spec"]["steps"]
+    assert result["dry_run"]["mode"] == "dry_run"
+    assert len(result["exports"]) == 2
+    assert result["readiness"]["verdict"] in {
+        "waiting_for_human_approval",
+        "blocked_by_credentials",
+        "ready_for_approved_live_execution",
+        "ready_for_dry_run",
+    }
+    assert result["production_contract"]["generated_from_prompt"] is True
+    assert result["production_contract"]["requires_human_approval_for_writes"] is True
+
+
+@pytest.mark.asyncio
 async def test_persistent_approval_queue_roundtrip(monkeypatch, tmp_path):
     from backend import main
 

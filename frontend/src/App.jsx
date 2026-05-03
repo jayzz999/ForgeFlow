@@ -1774,6 +1774,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
   const [prompt, setPrompt] = useState('Automate HR onboarding from an Excel sheet, draft a Gmail welcome email, post a Slack announcement, and append a Google Sheets tracking row.')
   const [activeSpec, setActiveSpec] = useState(null)
   const [conversation, setConversation] = useState(null)
+  const [autopilot, setAutopilot] = useState(null)
   const [exports, setExports] = useState([])
   const [validations, setValidations] = useState([])
   const [repairs, setRepairs] = useState([])
@@ -1795,6 +1796,36 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setConversation(payload.conversation)
       setMessage(`Found ${payload.conversation.process_steps.length} business steps and ${payload.conversation.questions.length} clarification questions`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const runAutopilot = async () => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/autopilot/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, platforms: ['forgeflow', 'n8n', 'zapier', 'github_actions'] }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      const result = payload.autopilot
+      setAutopilot(result)
+      setConversation(result.conversation)
+      setActiveSpec(result.spec)
+      setExports(result.exports)
+      setValidations(result.validations)
+      setRepairs(result.repair ? [result.repair] : [])
+      setMessage(`Autopilot ${result.readiness.verdict}: ${result.spec.steps.length} steps, ${result.exports.length} exports, dry-run ${result.dry_run.status}`)
+      onSpecsRefresh()
+      onRunsRefresh()
+      onGapsRefresh()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -1973,10 +2004,13 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
             className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm leading-6 outline-none focus:border-sky-400/50"
           />
           <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={runAutopilot} disabled={loading} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200 disabled:opacity-50">
+              <Sparkles size={16} /> Run autopilot
+            </button>
             <button onClick={askConversation} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
               <Search size={16} /> Ask smart questions
             </button>
-            <button onClick={compileSpec} disabled={loading} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200 disabled:opacity-50">
+            <button onClick={compileSpec} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
               <Workflow size={16} /> Compile spec
             </button>
             {latestSpec && (
@@ -2008,6 +2042,51 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
                   </div>
                 </div>
               ) : null}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Autopilot verdict</h3>
+          {!autopilot ? <EmptyState title="No autopilot run yet" body="Run autopilot to chain discovery, compile, validation, dry-run, export, repair, and readiness in one pass." /> : (
+            <div className="mt-4 space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded bg-sky-400/10 px-2 py-1 text-[11px] text-sky-200">{autopilot.readiness.verdict}</span>
+                <span className="rounded bg-forge-bg px-2 py-1 text-[11px] text-forge-muted">{autopilot.readiness.score}% readiness</span>
+                <span className={`rounded px-2 py-1 text-[11px] ${autopilot.readiness.live_execution_ready ? 'bg-emerald-400/10 text-emerald-200' : 'bg-amber-400/10 text-amber-200'}`}>
+                  {autopilot.readiness.live_execution_ready ? 'live ready' : 'live blocked'}
+                </span>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <Metric label="Discovered APIs" value={autopilot.discovery.public_apis.length + autopilot.discovery.local_capabilities.length} Icon={Search} tone="sky" />
+                <Metric label="Validated connectors" value={autopilot.validations.length} Icon={ShieldCheck} tone="emerald" />
+                <Metric label="Exports" value={autopilot.exports.length} Icon={Cloud} tone="amber" />
+              </div>
+              <div className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-forge-muted">Production contract</div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <ReadinessRow label="Generated from prompt" value={autopilot.production_contract.generated_from_prompt ? 'yes' : 'no'} ok={autopilot.production_contract.generated_from_prompt} />
+                  <ReadinessRow label="Grounded capabilities" value={autopilot.production_contract.uses_grounded_capabilities ? 'yes' : 'no'} ok={autopilot.production_contract.uses_grounded_capabilities} />
+                  <ReadinessRow label="Approval-first writes" value={autopilot.production_contract.requires_human_approval_for_writes ? 'yes' : 'not needed'} ok />
+                  <ReadinessRow label="Safe live deploy" value={autopilot.production_contract.safe_to_deploy_live ? 'yes' : 'not yet'} ok={autopilot.production_contract.safe_to_deploy_live} />
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-forge-muted">Next required actions</div>
+                <div className="mt-3 space-y-2">
+                  {autopilot.readiness.next_actions.length === 0 ? (
+                    <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 p-3 text-xs text-emerald-200">No blockers. Ready for approved live execution.</div>
+                  ) : autopilot.readiness.next_actions.map((action) => (
+                    <div key={`${action.type}-${action.connector_id || action.source_url || action.label}`} className={`rounded-lg border p-3 ${action.blocking ? 'border-amber-400/20 bg-amber-400/10' : 'border-forge-border bg-forge-bg/50'}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium">{action.label}</div>
+                        <span className="text-[11px] text-forge-muted">{action.blocking ? 'blocking' : 'recommended'}</span>
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-forge-muted">{action.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
         </div>

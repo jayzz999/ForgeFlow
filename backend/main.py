@@ -2054,6 +2054,152 @@ async def _live_run_automation_spec(spec_id: str, inputs: dict | None = None, ap
     return _list_runtime_runs(limit=1)[0]
 
 
+def _automation_missing_actions(spec: dict, validations: list[dict], dry_run: dict, discovery: dict) -> list[dict]:
+    actions = []
+    preflight = spec.get("preflight", {})
+
+    if preflight.get("schema_needed"):
+        actions.append({
+            "type": "schema_required",
+            "label": "Connect or upload the real source schema",
+            "detail": "ForgeFlow needs the actual CSV, Excel, table, or API schema before it can map fields without inventing names.",
+            "blocking": True,
+        })
+
+    for connector in spec.get("connectors", []):
+        if connector.get("status") == "needs_credentials":
+            service = connector.get("service") or connector.get("id", "").split(".", 1)[0]
+            actions.append({
+                "type": "credential_required",
+                "label": f"Connect {service}",
+                "detail": f"{connector['id']} needs credentials before live execution. Dry-run and approval previews remain available.",
+                "connector_id": connector["id"],
+                "service": service,
+                "required_env": connector.get("required_env", []),
+                "blocking": True,
+            })
+
+    for validation in validations:
+        if validation.get("status") != "ready":
+            actions.append({
+                "type": "connector_validation",
+                "label": f"Validate {validation['adapter_id']}",
+                "detail": "Connector contract is available, but credentials or live provider readiness are incomplete.",
+                "connector_id": validation["adapter_id"],
+                "blocking": False,
+            })
+
+    if any(step.get("status") == "waiting_for_approval" for step in dry_run.get("steps", [])):
+        actions.append({
+            "type": "approval_required",
+            "label": "Approve risky external actions",
+            "detail": "External writes are paused in the approval queue with preview payloads before live execution.",
+            "blocking": True,
+        })
+
+    if not discovery.get("local_capabilities") and discovery.get("public_apis"):
+        first = discovery["public_apis"][0]
+        actions.append({
+            "type": "api_import_suggested",
+            "label": f"Import {first.get('title') or first.get('id')} OpenAPI spec",
+            "detail": "No strong local capability matched this request. Importing the public API spec can add grounded operations.",
+            "source_url": first.get("source_url"),
+            "blocking": False,
+        })
+
+    seen = set()
+    deduped = []
+    for action in actions:
+        key = (action.get("type"), action.get("connector_id"), action.get("source_url"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+    return deduped
+
+
+def _automation_readiness(spec: dict, validations: list[dict], dry_run: dict, discovery: dict) -> dict:
+    missing_actions = _automation_missing_actions(spec, validations, dry_run, discovery)
+    blocking = [item for item in missing_actions if item.get("blocking")]
+    dry_status = dry_run.get("status")
+    export_ready = dry_status in {"succeeded", "waiting_for_approval", "blocked"}
+    live_ready = not blocking and dry_status == "succeeded" and all(item.get("status") == "ready" for item in validations)
+    if live_ready:
+        verdict = "ready_for_approved_live_execution"
+    elif any(item["type"] == "schema_required" for item in blocking):
+        verdict = "blocked_by_schema"
+    elif any(item["type"] == "credential_required" for item in blocking):
+        verdict = "blocked_by_credentials"
+    elif any(item["type"] == "approval_required" for item in blocking):
+        verdict = "waiting_for_human_approval"
+    else:
+        verdict = "ready_for_dry_run"
+    return {
+        "verdict": verdict,
+        "score": max(0, 100 - (len(blocking) * 20) - max(0, len(missing_actions) - len(blocking)) * 5),
+        "live_execution_ready": live_ready,
+        "export_ready": export_ready,
+        "blocking_actions": blocking,
+        "next_actions": missing_actions,
+        "safety": {
+            "live_call_performed": False,
+            "approval_first": bool(spec.get("approval_gates")),
+            "dry_run_status": dry_status,
+        },
+    }
+
+
+async def _run_prompt_autopilot(prompt: str, context: dict | None = None, platforms: list[str] | None = None) -> dict:
+    context = context or {}
+    platforms = platforms or ["forgeflow", "n8n", "zapier", "github_actions"]
+    conversation = _business_conversation(prompt, context)
+    discovery = _discover_capabilities(prompt, limit=8, include_public=True)
+    spec = await _compile_automation_spec(prompt, context)
+    validations = []
+    for connector in spec.get("connectors", []):
+        try:
+            validations.append(_validate_connector_adapter(connector["id"]))
+        except HTTPException as exc:
+            validations.append({
+                "id": _stable_id("validation_error", {"adapter_id": connector["id"]}),
+                "adapter_id": connector["id"],
+                "status": "missing_adapter",
+                "checks": [{"id": "adapter", "label": "Adapter contract", "status": "fail", "detail": exc.detail}],
+                "alternatives": [{"id": "http.request", "label": "Import an OpenAPI spec or use generic HTTP"}],
+                "created_at": _now_iso(),
+            })
+
+    dry_run = await _dry_run_automation_spec(spec["id"], {"source": "autopilot", **context.get("sample_inputs", {})})
+    exports = [_export_spec_to_platform(spec["id"], platform) for platform in platforms]
+    repair = _repair_runtime_run(dry_run["id"]) if dry_run.get("status") in {"blocked", "waiting_for_approval", "failed"} else None
+    readiness = _automation_readiness(spec, validations, dry_run, discovery)
+    _record_observability_event(
+        "autopilot",
+        "info" if readiness["live_execution_ready"] else "warning",
+        "prompt_autopilot_completed",
+        spec["id"],
+        {"verdict": readiness["verdict"], "score": readiness["score"], "dry_run_status": dry_run.get("status")},
+    )
+    return {
+        "prompt": prompt,
+        "conversation": conversation,
+        "discovery": discovery,
+        "spec": spec,
+        "validations": validations,
+        "dry_run": dry_run,
+        "exports": exports,
+        "repair": repair,
+        "readiness": readiness,
+        "production_contract": {
+            "generated_from_prompt": True,
+            "uses_grounded_capabilities": bool(spec.get("connectors")),
+            "requires_human_approval_for_writes": bool(spec.get("approval_gates")),
+            "safe_to_deploy_live": readiness["live_execution_ready"],
+            "why_not_live": [item["label"] for item in readiness["blocking_actions"]],
+        },
+    }
+
+
 def _business_conversation(prompt: str, context: dict | None = None) -> dict:
     prompt_lower = prompt.lower()
     known_systems = []
@@ -4106,6 +4252,18 @@ async def compile_automation_spec(body: dict):
         raise HTTPException(status_code=400, detail="prompt is required")
     spec = await _compile_automation_spec(prompt, body.get("context", {}))
     return {"spec": spec}
+
+
+@app.post("/api/autopilot/run")
+async def prompt_autopilot(body: dict):
+    """Run the full prompt-to-automation loop and return a production readiness verdict."""
+    prompt = str(body.get("prompt", "")).strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    platforms = body.get("platforms") or ["forgeflow", "n8n", "zapier", "github_actions"]
+    if not isinstance(platforms, list):
+        raise HTTPException(status_code=400, detail="platforms must be a list")
+    return {"autopilot": await _run_prompt_autopilot(prompt, body.get("context", {}), [str(item) for item in platforms])}
 
 
 @app.get("/api/specs/{spec_id}/exports")
