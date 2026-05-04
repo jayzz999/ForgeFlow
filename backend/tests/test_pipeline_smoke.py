@@ -16,6 +16,7 @@ async def test_pipeline_smoke_deploys_with_mocked_llm(monkeypatch, tmp_path):
 
     workflow_store.WORKFLOWS_DIR = str(tmp_path / "workflows")
     workflow_store.DB_PATH = str(tmp_path / "forgeflow.db")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-unit-test-token")
     graph._graph = None
 
     api = APIEndpoint(
