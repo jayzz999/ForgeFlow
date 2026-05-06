@@ -5,6 +5,12 @@ load_dotenv()
 
 
 class Settings:
+    FORGEFLOW_ENV: str = os.getenv("FORGEFLOW_ENV", "development").lower()
+    FORGEFLOW_ENABLE_DEMO_ENDPOINTS: bool = os.getenv("FORGEFLOW_ENABLE_DEMO_ENDPOINTS", "0") in ("1", "true", "yes")
+    FORGEFLOW_QUEUE_WORKER: bool = os.getenv("FORGEFLOW_QUEUE_WORKER", "0") in ("1", "true", "yes")
+    FORGEFLOW_RUNTIME_BASE_URL: str = os.getenv("FORGEFLOW_RUNTIME_BASE_URL", "")
+    FORGEFLOW_VAULT_KEY: str = os.getenv("FORGEFLOW_VAULT_KEY", "")
+
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").lower()
     LLM_FALLBACK_PROVIDER: str = os.getenv("LLM_FALLBACK_PROVIDER", "gemini").lower()
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")

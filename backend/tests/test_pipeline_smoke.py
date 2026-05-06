@@ -1057,6 +1057,53 @@ async def test_hr_onboarding_demo_covers_challenge_loop(monkeypatch, tmp_path):
     assert main._list_workflow_exports(result["spec"]["id"])
 
 
+@pytest.mark.asyncio
+async def test_production_blocks_demo_endpoints(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_ENV", "production")
+    monkeypatch.delenv("FORGEFLOW_ENABLE_DEMO_ENDPOINTS", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        await main.hr_onboarding_challenge_demo({})
+
+    assert exc.value.status_code == 403
+    assert "disabled in production" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_production_allows_demo_when_explicitly_enabled(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_ENV", "production")
+    monkeypatch.setenv("FORGEFLOW_ENABLE_DEMO_ENDPOINTS", "1")
+
+    result = await main.hr_onboarding_challenge_demo({})
+
+    assert result["answer_to_challenge"]["live_generation"] is True
+
+
+def test_production_readiness_reports_blockers(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_ENV", "production")
+    monkeypatch.setenv("FORGEFLOW_ADMIN_TOKEN", "change-me")
+    monkeypatch.delenv("FORGEFLOW_VAULT_KEY", raising=False)
+    monkeypatch.delenv("FORGEFLOW_ENABLE_DEMO_ENDPOINTS", raising=False)
+    monkeypatch.setenv("FORGEFLOW_ALLOW_UNAUTH_DANGEROUS", "0")
+
+    report = main._production_readiness_report()
+
+    assert report["production_mode"] is True
+    assert report["ready"] is False
+    assert {item["id"] for item in report["blockers"]} >= {"admin_token", "vault_key"}
+    assert any(item["id"] == "demo_endpoints" and item["status"] == "pass" for item in report["checks"])
+
+
 def test_staging_profile_is_draft_first(monkeypatch, tmp_path):
     from backend import main
 

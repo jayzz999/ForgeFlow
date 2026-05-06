@@ -99,6 +99,17 @@ docker-compose up --build
 
 The frontend runs on `http://localhost:3000` and the backend on `http://localhost:8000`.
 
+## Production Mode
+
+ForgeFlow now has an explicit production readiness boundary:
+
+```bash
+FORGEFLOW_ENV=production
+curl http://127.0.0.1:8000/api/production/readiness
+```
+
+In production mode, cached demo endpoints are blocked unless `FORGEFLOW_ENABLE_DEMO_ENDPOINTS=1`, live execution still requires approval, and readiness reports missing vault keys, weak admin tokens, connector credentials, queue workers, MCP runtime ingestion, and deployment targets. See `docs/PRODUCTION.md` and `.env.production.example`.
+
 ## Reliability And Safety
 
 - CI runs backend tests and the frontend production build on every push and pull request.

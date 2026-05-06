@@ -69,7 +69,10 @@ RUN_ENV_PREFIXES = (
 )
 RUN_ENV_EXACT = {"TARGET_URL"}
 MAX_RUN_OUTPUT_CHARS = 12000
-PLATFORM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "forgeflow_platform.db")
+PLATFORM_DB_PATH = os.getenv(
+    "PLATFORM_DB_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "forgeflow_platform.db"),
+)
 APP_BUILDS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app_builds")
 API_GURU_LIST_URL = "https://api.apis.guru/v2/list.json"
 
@@ -131,6 +134,128 @@ DEPLOYMENT_TARGETS = [
         "requires": ["public runtime", "auth policy"],
     },
 ]
+
+
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+
+def _production_mode() -> bool:
+    return os.getenv("FORGEFLOW_ENV", settings.FORGEFLOW_ENV).lower() in {"prod", "production"}
+
+
+def _demo_endpoints_enabled() -> bool:
+    return not _production_mode() or _truthy_env("FORGEFLOW_ENABLE_DEMO_ENDPOINTS")
+
+
+def _require_demo_enabled():
+    if not _demo_endpoints_enabled():
+        raise HTTPException(status_code=403, detail="Demo endpoints are disabled in production")
+
+
+def _check_status(ok: bool, fail_in_production: bool = True) -> str:
+    if ok:
+        return "pass"
+    return "fail" if _production_mode() and fail_in_production else "warn"
+
+
+def _production_readiness_report() -> dict:
+    """Report the blockers that separate a demo workspace from a production runtime."""
+    admin_token = os.getenv("FORGEFLOW_ADMIN_TOKEN", settings.FORGEFLOW_ADMIN_TOKEN)
+    weak_admin_token = not admin_token or admin_token in {"change-me", "changeme", "secret", "password"}
+    allow_unauth = _truthy_env("FORGEFLOW_ALLOW_UNAUTH_DANGEROUS")
+    vault_key = os.getenv("FORGEFLOW_VAULT_KEY", settings.FORGEFLOW_VAULT_KEY)
+    connectors = _list_connector_states()
+    connected_connectors = [item for item in connectors if item["status"] == "connected"]
+    provider_health = _deployment_provider_health()
+    ready_targets = [item for item in provider_health if item["status"] == "pass"]
+    db_path = os.path.abspath(PLATFORM_DB_PATH)
+    repo_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    local_sqlite = db_path.startswith(repo_root)
+    demo_enabled = _demo_endpoints_enabled()
+
+    checks = [
+        {
+            "id": "environment",
+            "label": "Production environment selected",
+            "status": "pass" if _production_mode() else "warn",
+            "detail": os.getenv("FORGEFLOW_ENV", settings.FORGEFLOW_ENV),
+        },
+        {
+            "id": "admin_token",
+            "label": "Strong admin token configured",
+            "status": _check_status(not weak_admin_token),
+            "detail": "FORGEFLOW_ADMIN_TOKEN is set" if not weak_admin_token else "Set a high-entropy FORGEFLOW_ADMIN_TOKEN",
+        },
+        {
+            "id": "dangerous_unauth",
+            "label": "Dangerous unauthenticated execution disabled",
+            "status": _check_status(not allow_unauth),
+            "detail": "FORGEFLOW_ALLOW_UNAUTH_DANGEROUS is disabled" if not allow_unauth else "Set FORGEFLOW_ALLOW_UNAUTH_DANGEROUS=0",
+        },
+        {
+            "id": "vault_key",
+            "label": "Dedicated credential vault key configured",
+            "status": _check_status(bool(vault_key)),
+            "detail": "FORGEFLOW_VAULT_KEY is set" if vault_key else "Set FORGEFLOW_VAULT_KEY before storing production secrets",
+        },
+        {
+            "id": "demo_endpoints",
+            "label": "Demo endpoints disabled",
+            "status": _check_status(not demo_enabled),
+            "detail": "Demo endpoints are disabled" if not demo_enabled else "Set FORGEFLOW_ENABLE_DEMO_ENDPOINTS=0 in production",
+        },
+        {
+            "id": "queue_worker",
+            "label": "Hosted queue worker enabled",
+            "status": _check_status(_truthy_env("FORGEFLOW_QUEUE_WORKER"), fail_in_production=False),
+            "detail": "FORGEFLOW_QUEUE_WORKER=1" if _truthy_env("FORGEFLOW_QUEUE_WORKER") else "Enable FORGEFLOW_QUEUE_WORKER=1 for scheduled/webhook jobs",
+        },
+        {
+            "id": "connector_credentials",
+            "label": "At least one live connector credential configured",
+            "status": _check_status(bool(connected_connectors), fail_in_production=False),
+            "detail": f"{len(connected_connectors)} connected connector(s)",
+        },
+        {
+            "id": "deployment_target",
+            "label": "At least one deployment target ready",
+            "status": _check_status(bool(ready_targets), fail_in_production=False),
+            "detail": ", ".join(item["name"] for item in ready_targets) if ready_targets else "Configure Docker, GitHub, Render, or hosted runtime credentials",
+        },
+        {
+            "id": "runtime_base_url",
+            "label": "Hosted runtime base URL configured",
+            "status": _check_status(bool(os.getenv("FORGEFLOW_RUNTIME_BASE_URL", settings.FORGEFLOW_RUNTIME_BASE_URL)), fail_in_production=False),
+            "detail": os.getenv("FORGEFLOW_RUNTIME_BASE_URL", settings.FORGEFLOW_RUNTIME_BASE_URL) or "Set FORGEFLOW_RUNTIME_BASE_URL for webhook activation",
+        },
+        {
+            "id": "database",
+            "label": "Persistent production database configured",
+            "status": _check_status(not local_sqlite, fail_in_production=False),
+            "detail": db_path if not local_sqlite else "Local SQLite is acceptable for staging; use a mounted volume or managed DB in production",
+        },
+        {
+            "id": "mcp_runtime",
+            "label": "MCP runtime adapter ingestion connected",
+            "status": _check_status(_truthy_env("FORGEFLOW_MCP_RUNTIME_ENABLED"), fail_in_production=False),
+            "detail": "FORGEFLOW_MCP_RUNTIME_ENABLED=1" if _truthy_env("FORGEFLOW_MCP_RUNTIME_ENABLED") else "Enable MCP ingestion before claiming dynamic external tool support",
+        },
+    ]
+    blockers = [check for check in checks if check["status"] == "fail"]
+    warnings = [check for check in checks if check["status"] == "warn"]
+    pass_count = sum(1 for check in checks if check["status"] == "pass")
+    return {
+        "production_mode": _production_mode(),
+        "ready": not blockers and not warnings,
+        "score": round((pass_count / len(checks)) * 100),
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": warnings,
+        "connected_connectors": [item["service"] for item in connected_connectors],
+        "deployment_targets": provider_health,
+        "next_actions": [item["detail"] for item in blockers + warnings],
+    }
 
 
 def _workflow_run_env() -> dict[str, str]:
@@ -4199,6 +4324,12 @@ async def product_gaps():
     return _product_gap_analysis()
 
 
+@app.get("/api/production/readiness")
+async def production_readiness():
+    """Return fail-closed production launch readiness across runtime, credentials, and deploy."""
+    return _production_readiness_report()
+
+
 @app.get("/api/capabilities")
 async def capabilities():
     """List typed capabilities the planner should compose before custom code."""
@@ -4325,6 +4456,7 @@ async def observability():
 @app.post("/api/demo/hr-onboarding")
 async def hr_onboarding_challenge_demo(body: dict | None = None):
     """Run the hackathon challenge path: prompt, spec, dry-run, exports, validation, repair."""
+    _require_demo_enabled()
     body = body or {}
     return await _run_hr_onboarding_demo(body.get("prompt"))
 
@@ -4338,6 +4470,7 @@ async def staging_profile():
 @app.post("/api/demo/judge")
 async def judge_challenge_demo(body: dict | None = None):
     """Run the end-to-end staging demo packet for live judging."""
+    _require_demo_enabled()
     body = body or {}
     return await _run_judge_demo(body.get("prompt"))
 
@@ -5417,6 +5550,15 @@ async def _run_modify_ws(client_id: str, msg: dict):
 
 async def _run_demo_ws(client_id: str):
     """Replay cached demo events for reliable demos."""
+    if not _demo_endpoints_enabled():
+        await manager.send_event(client_id, {
+            "event_type": "error",
+            "message": "Demo WebSocket replay is disabled in production.",
+            "data": {"reason": "set FORGEFLOW_ENABLE_DEMO_ENDPOINTS=1 only for staging demos"},
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        return
+
     demo_path = os.path.join(os.path.dirname(__file__), "demo_cache.json")
     if not os.path.exists(demo_path):
         await manager.send_event(client_id, {
