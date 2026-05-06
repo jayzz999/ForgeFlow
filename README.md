@@ -1,22 +1,22 @@
 # ForgeFlow
 
-ForgeFlow turns plain-English workflow descriptions into deployed Python automation projects. It discovers APIs, builds an execution DAG, generates code, tests it, self-debug patches failures, and saves a runnable deployment package.
+ForgeFlow turns plain-English business requests into grounded automation workflows and runnable software artifacts. It can collect requirements conversationally, discover APIs, import OpenAPI/MCP capabilities, validate credentials, preview risky actions, run durable jobs, generate app-builder artifacts, and prepare deployment targets.
 
 ## What It Does
 
-Most automation tools connect pre-built blocks. ForgeFlow generates the workflow project itself:
+Most automation tools expect users to know APIs, auth, schemas, and workflow internals. ForgeFlow tries to bridge that translation layer:
 
 | Layer | Component | What It Does |
 |-------|-----------|-------------|
 | 1 | Conversation Engine | Extracts requirements from natural language and asks targeted clarification questions |
-| 2 | Semantic API Discovery | Finds matching APIs from indexed service specs using ChromaDB vector search |
-| 3 | DAG Planner | Builds dependency-aware workflow steps and data mappings |
-| 4 | Code Generator | Uses the configured LLM provider to research APIs and write executable Python |
-| 5 | Security Review | Scans generated code for unsafe patterns |
-| 6 | Test Generator | Creates pytest coverage for the generated workflow |
-| 7 | Sandbox Execution | Runs code in Docker when available, with AST validation as fallback |
-| 8 | Self-Debugger | Diagnoses failures, patches code, and retries |
-| 9 | Deployment | Saves a complete runnable project with Docker, Compose, Makefile, README, and env template |
+| 2 | API + Tool Discovery | Searches built-in connectors, imported OpenAPI specs, MCP manifests, and public API directories |
+| 3 | Canonical Spec Compiler | Converts prompts into typed workflow specs with steps, connector contracts, tests, approvals, and deployment targets |
+| 4 | Credential Center | Stores encrypted credentials, starts OAuth flows, rotates secrets, probes connectors, and reports missing credentials per workflow |
+| 5 | Runtime Planner | Produces safe live-execution plans with required fields, credentials, approval state, request previews, and compensation hints |
+| 6 | Durable Runtime | Queues webhook/scheduled/manual jobs, retries failures, dead-letters exhausted jobs, records run logs, and recovers stale running items |
+| 7 | Code Generator + Sandbox | Generates Python workflow packages, reviews them, tests them, executes them in Docker when available, and self-debug patches failures |
+| 8 | App Builder | Routes software prompts, such as games or web apps, into runnable HTML/CSS/JS artifacts with QA checks and package downloads |
+| 9 | Deployment Planner | Prepares Docker, GitHub Actions, Render, Vercel, and webhook-runtime deployment dispatches with readiness checks |
 
 ## Architecture
 
@@ -27,47 +27,78 @@ User Request
 Conversation Engine
     |
     v
-API Discovery
+API / OpenAPI / MCP Discovery
     |
     v
-DAG Planner
+Canonical Automation Spec
     |
     v
-Code Generator
+Credential + Approval Preflight
     |
     v
-Security Review
+Dry Run / Execution Plan
     |
     v
-Test Generator
+Queue Worker / Webhook / Schedule
     |
     v
-Sandbox Execute <--> Self-Debug Loop
+Live Connector Runtime OR Codegen Sandbox <--> Self-Debug Loop
     |
     v
-Deploy Workflow Package
+Deployment Dispatch / App Package
 ```
 
-## Demo Mode
+## Product Modes
 
-The frontend includes a demo mode for reliable walkthroughs:
+ForgeFlow has three main workspaces:
 
-1. Open the app.
-2. Click **Load Demo Workflow**.
-3. Watch API discovery, DAG construction, code streaming, self-debug, and deployment events replay through the UI.
+- **Automation Builder**: prompt to generated Python workflow project.
+- **Runtime**: prompt to canonical automation spec, dry-run ledger, credential checks, live execution planning, approvals, exports, and repair.
+- **App Builder**: prompt to runnable app/game/site artifact with live preview, QA checks, and zip download.
+
+Demo replay still exists for walkthroughs, but production mode blocks demo endpoints unless explicitly enabled.
 
 ## Real Integrations
 
-ForgeFlow generates code that makes real API calls when credentials are configured.
+ForgeFlow supports both built-in connectors and dynamically imported tools.
 
 | Service | Auth Method | Capabilities |
 |---------|-------------|--------------|
-| Slack | Bot Token | Send messages, create channels, invite users, lookup users, upload files |
-| Gmail | SMTP App Password | Send plain-text or HTML emails |
-| Google Sheets | API Key | Read ranges, append rows, update values |
-| HTTP/Webhooks | URL/API token | Monitor URLs and call REST endpoints |
+| Slack | Bot Token / OAuth | Post messages, create channels, read-only auth probe |
+| Gmail | OAuth / token | Send email, create drafts, read-only profile probe |
+| Google Sheets | OAuth / token | Append rows, read ranges |
+| Google Calendar | OAuth / token | Create events |
+| Stripe | API Key | Retrieve payments, create refunds with approval |
+| Zendesk | API Token | Create tickets |
+| HubSpot | Bearer Token | Create contacts, update deals |
+| Okta | API Token | Create users, assign groups |
+| Salesforce, Jira, Notion, Airtable, Teams | Provider tokens | Typed request generation and live-readiness planning |
+| HTTP/Webhooks | URL/API token | Generic validated HTTP requests |
+| OpenAPI Imports | Spec-defined auth | Operations become capabilities automatically |
+| MCP Manifests | Tool-defined auth | Tools become JSON-RPC execution capabilities |
 
-Services without configured credentials are skipped gracefully in generated workflows instead of crashing.
+Live execution is approval-first. If credentials, required fields, or approvals are missing, ForgeFlow blocks the run and explains the next action instead of pretending the workflow deployed.
+
+## Runtime APIs
+
+Useful backend endpoints:
+
+```bash
+GET  /api/production/readiness
+POST /api/openapi/ingest
+POST /api/openapi/import-url
+POST /api/mcp/discover
+POST /api/specs/compile
+GET  /api/specs/{spec_id}/credentials
+POST /api/runtime/specs/{spec_id}/execution-plan
+POST /api/runtime/specs/{spec_id}/dry-run
+POST /api/runtime/specs/{spec_id}/execute-live
+POST /api/queue
+POST /api/queue/{queue_id}/process
+POST /api/queue/process-due
+POST /api/queue/recover-stale
+POST /api/runtime/runs/{run_id}/repair/retest
+```
 
 ## Quick Start
 
@@ -110,12 +141,23 @@ curl http://127.0.0.1:8000/api/production/readiness
 
 In production mode, cached demo endpoints are blocked unless `FORGEFLOW_ENABLE_DEMO_ENDPOINTS=1`, live execution still requires approval, and readiness reports missing vault keys, weak admin tokens, connector credentials, queue workers, MCP runtime ingestion, and deployment targets. See `docs/PRODUCTION.md` and `.env.production.example`.
 
+Production rehearsal:
+
+```bash
+cp .env.production.example .env.production
+docker compose -f docker-compose.prod.yml --env-file .env.production up --build
+python scripts/production_smoke.py
+```
+
 ## Reliability And Safety
 
 - CI runs backend tests and the frontend production build on every push and pull request.
 - A mocked end-to-end smoke test verifies the pipeline can produce and save a workflow without paid LLM calls.
 - Generated workflow runs are protected by `FORGEFLOW_ADMIN_TOKEN`.
 - Workflow execution uses a temporary run directory and only receives allowlisted service environment variables.
+- Live connector execution requires explicit approval and safe request planning.
+- Queue workers support retries, backoff, dead letters, scheduled triggers, webhook triggers, and stale job recovery.
+- Connector errors are classified into credential, approval, missing-field, provider, endpoint, timeout, and repair/retest actions.
 - Deployment packages include an `artifacts/` folder with structured requirements, DAG, security, test, execution, and debug data.
 - Old workflow packages can be deleted individually or pruned through the admin API.
 
@@ -131,6 +173,7 @@ In production mode, cached demo endpoints are blocked unless `FORGEFLOW_ENABLE_D
 | Frontend | React + Vite + React Flow + Tailwind CSS |
 | Sandbox | Docker primary, AST validation fallback |
 | Slack Bot | Slack Bolt Socket Mode |
+| Runtime DB | SQLite by default; mount or replace for production |
 
 ## Project Structure
 
@@ -166,6 +209,9 @@ frontend/
       DebugOverlay.jsx
 
 workflows/               # Generated workflow projects
+app_builds/              # Generated app-builder artifacts
+docs/PRODUCTION.md       # Production readiness/deployment notes
+docker-compose.prod.yml  # Production rehearsal compose file
 ```
 
 ## Environment Variables
@@ -201,6 +247,12 @@ CHROMA_PERSIST_DIR=./chroma_db
 SANDBOX_TIMEOUT=60
 FORGEFLOW_ADMIN_TOKEN=change-me
 FORGEFLOW_ALLOW_UNAUTH_DANGEROUS=0
+FORGEFLOW_ENV=development
+FORGEFLOW_ENABLE_DEMO_ENDPOINTS=1
+FORGEFLOW_VAULT_KEY=
+FORGEFLOW_QUEUE_WORKER=0
+FORGEFLOW_RUNTIME_BASE_URL=
+FORGEFLOW_MCP_RUNTIME_ENABLED=0
 ```
 
 `FORGEFLOW_ADMIN_TOKEN` is required for endpoints that execute generated workflow code unless `FORGEFLOW_ALLOW_UNAUTH_DANGEROUS=1` is explicitly set for local demos.
