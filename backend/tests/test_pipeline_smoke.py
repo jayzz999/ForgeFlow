@@ -597,9 +597,24 @@ def test_mcp_ingestion_extracts_tools():
             "description": "Find an employee by email",
             "dry_run": True,
             "source": "mcp",
+            "server_url": None,
+            "tool_name": "lookup_employee",
             "input_schema": {"email": "string"},
         }
     ]
+
+
+def test_mcp_ingestion_keeps_runtime_server_url():
+    from backend import main
+
+    capabilities = main._extract_mcp_capabilities({
+        "name": "calendar-mcp",
+        "server_url": "https://mcp.example/rpc",
+        "tools": [{"name": "create_training_event", "description": "Create training"}],
+    })
+
+    assert capabilities[0]["server_url"] == "https://mcp.example/rpc"
+    assert capabilities[0]["tool_name"] == "create_training_event"
 
 
 def test_public_api_directory_search_ranks_openapi_candidates():
@@ -931,6 +946,166 @@ def test_deployment_dispatch_records_provider_request(monkeypatch, tmp_path):
     assert jobs[0]["provider_request"]["provider"] == "render"
     assert jobs[0]["provider_request"]["operation"] == "create_or_update_worker_blueprint"
     assert jobs[0]["provider_response"]["live_call_performed"] is False
+
+
+def test_openapi_capability_builds_sanitized_live_request(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    ingestion = main._store_ingestion(
+        "openapi",
+        "Support API",
+        {"title": "Support API"},
+        [{
+            "id": "openapi.createTicket",
+            "label": "Create ticket",
+            "source": "openapi",
+            "risk": "external_write",
+            "requires_auth": [],
+            "method": "POST",
+            "path": "/tickets/{ticket_id}",
+            "server_url": "https://support.example",
+            "description": "POST /tickets/{ticket_id}",
+        }],
+    )
+    spec = main._store_automation_spec({
+        "goal": "Create support ticket",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "openapi.createTicket", "service": "openapi", "status": "ready"}],
+        "steps": [{"id": "step_1", "name": "Create ticket", "connector_id": "openapi.createTicket", "approval_required": False}],
+        "approval_gates": [],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "ready",
+    })
+
+    plan = main._runtime_execution_plan(spec["id"], {"ticket_id": "T-1", "body": {"subject": "Hi"}}, approved=True)
+
+    assert ingestion["capabilities"][0]["id"] == "openapi.createTicket"
+    assert plan["ready"] is True
+    assert plan["steps"][0]["request_preview"]["url"] == "https://support.example/tickets/T-1"
+    assert plan["steps"][0]["request_preview"]["method"] == "POST"
+
+
+def test_mcp_capability_builds_jsonrpc_request(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    main._store_ingestion(
+        "mcp",
+        "HR MCP",
+        {"name": "HR MCP"},
+        [{
+            "id": "mcp.lookup_employee",
+            "label": "Lookup Employee",
+            "source": "mcp",
+            "risk": "tool_call",
+            "requires_auth": [],
+            "server_url": "https://mcp.example/rpc",
+            "tool_name": "lookup_employee",
+            "description": "Lookup employee",
+        }],
+    )
+    spec = main._store_automation_spec({
+        "goal": "Lookup employee",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "mcp.lookup_employee", "service": "mcp", "status": "ready"}],
+        "steps": [{"id": "step_1", "name": "Lookup employee", "connector_id": "mcp.lookup_employee", "approval_required": False}],
+        "approval_gates": [],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "ready",
+    })
+
+    plan = main._runtime_execution_plan(spec["id"], {"arguments": {"email": "ada@example.com"}}, approved=True)
+
+    assert plan["ready"] is True
+    assert plan["steps"][0]["request_preview"]["url"] == "https://mcp.example/rpc"
+    assert plan["steps"][0]["request_preview"]["body_preview"]["method"] == "tools/call"
+
+
+@pytest.mark.asyncio
+async def test_queue_processes_compiled_spec_runtime(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    spec = main._store_automation_spec({
+        "goal": "Call internal webhook",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "http.request", "service": "http", "status": "ready"}],
+        "steps": [{"id": "step_1", "name": "Call webhook", "connector_id": "http.request", "approval_required": False}],
+        "approval_gates": [],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "ready",
+    })
+    queued = main._enqueue_run(spec["id"], {"mode": "dry_run", "inputs": {"url": "https://example.com"}})
+
+    processed = await main._process_queue_item(queued["id"])
+
+    assert processed["queue_status"] == "succeeded"
+    assert "runtime_run_id" in processed["run"]["stdout"]
+
+
+def test_spec_credential_requirements(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    spec = main._store_automation_spec({
+        "goal": "Post Slack",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "slack.post_message", "service": "slack", "status": "needs_credentials"}],
+        "steps": [],
+        "approval_gates": [],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "blocked",
+    })
+
+    requirements = main._credential_requirements_for_spec(spec["id"])
+
+    assert requirements["ready"] is False
+    assert requirements["missing"][0]["service"] == "slack"
+
+
+def test_app_builder_manifest_includes_qa(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "APP_BUILDS_DIR", str(tmp_path / "app_builds"))
+
+    build = main._generate_app_build("Build a tic tac toe game app.")
+
+    assert build["qa"]["status"] == "pass"
+    assert any(item["id"] == "game_rules" for item in build["qa"]["checks"])
+
+
+def test_stale_queue_recovery_requeues_running_item(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    queued = main._enqueue_run("workflow_1", {"source": "test"}, max_attempts=3)
+    conn = main._platform_db()
+    conn.execute(
+        "UPDATE run_queue SET status = 'running', attempts = 1, updated_at = ? WHERE id = ?",
+        ("2020-01-01T00:00:00Z", queued["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    recovered = main._recover_stale_queue_items(max_age_seconds=1)
+    queue = main._list_run_queue()
+
+    assert recovered["count"] == 1
+    assert queue[0]["status"] == "queued"
 
 
 @pytest.mark.asyncio

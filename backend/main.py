@@ -127,6 +127,14 @@ DEPLOYMENT_TARGETS = [
         "requires_env": ["RENDER_API_KEY"],
     },
     {
+        "id": "vercel_project",
+        "name": "Vercel Project",
+        "status": "planned",
+        "description": "Deploy generated app-builder artifacts or webhook runtimes to Vercel.",
+        "requires": ["Vercel account", "project token"],
+        "requires_env": ["VERCEL_TOKEN"],
+    },
+    {
         "id": "webhook_runtime",
         "name": "Hosted Webhook Runtime",
         "status": "planned",
@@ -1431,8 +1439,26 @@ async def _process_queue_item(queue_id: str) -> dict:
     conn.execute("UPDATE run_queue SET status = 'running', attempts = ?, updated_at = ? WHERE id = ?", (attempts, now, queue_id))
     conn.commit()
     conn.close()
+    payload = _json_loads(row["payload_json"], {})
     try:
-        result = await _execute_workflow_project(row["workflow_id"])
+        spec = _get_automation_spec(row["workflow_id"])
+        if spec:
+            mode = payload.get("mode", "dry_run")
+            inputs = payload.get("inputs", payload.get("payload", payload))
+            runtime_run = (
+                await _live_run_automation_spec(row["workflow_id"], inputs, approved=bool(payload.get("approved")))
+                if mode == "live"
+                else await _dry_run_automation_spec(row["workflow_id"], inputs)
+            )
+            result = {
+                "success": runtime_run["status"] in {"succeeded", "waiting_for_approval"},
+                "stdout": json.dumps({"runtime_run_id": runtime_run["id"], "status": runtime_run["status"]}),
+                "stderr": "" if runtime_run["status"] in {"succeeded", "waiting_for_approval"} else runtime_run["status"],
+                "execution_time": 0.0,
+                "return_code": 0 if runtime_run["status"] in {"succeeded", "waiting_for_approval"} else 1,
+            }
+        else:
+            result = await _execute_workflow_project(row["workflow_id"])
     except HTTPException as exc:
         result = {"success": False, "stdout": "", "stderr": exc.detail, "execution_time": 0.0, "return_code": -1}
     except Exception as exc:
@@ -1470,6 +1496,42 @@ async def _process_queue_item(queue_id: str) -> dict:
         payload={"queue_id": queue_id, "status": final_status, "attempts": attempts, "max_attempts": max_attempts},
     )
     return {"queue_id": queue_id, "queue_status": final_status, "run": {**result, **run_meta}}
+
+
+def _recover_stale_queue_items(max_age_seconds: int = 600) -> dict:
+    cutoff = datetime.utcfromtimestamp(datetime.utcnow().timestamp() - max_age_seconds).isoformat() + "Z"
+    conn = _platform_db()
+    rows = conn.execute(
+        "SELECT * FROM run_queue WHERE status = 'running' AND updated_at <= ?",
+        (cutoff,),
+    ).fetchall()
+    recovered = []
+    for row in rows:
+        attempts = int(row["attempts"] or 0)
+        max_attempts = int(row["max_attempts"] or 3)
+        status = "dead_letter" if attempts >= max_attempts else "queued"
+        reason = "stale_running_recovered"
+        conn.execute(
+            """
+            UPDATE run_queue
+            SET status = ?, last_error = ?, dead_letter_reason = ?, next_attempt_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                reason,
+                reason if status == "dead_letter" else None,
+                _now_iso(),
+                _now_iso(),
+                row["id"],
+            ),
+        )
+        recovered.append({"id": row["id"], "workflow_id": row["workflow_id"], "status": status})
+    conn.commit()
+    conn.close()
+    if recovered:
+        _record_observability_event("worker", "warn", "stale_queue_recovered", "run_queue", {"count": len(recovered), "items": recovered})
+    return {"recovered": recovered, "count": len(recovered)}
 
 
 async def _process_due_queue(limit: int = 5) -> dict:
@@ -1987,6 +2049,20 @@ def _inputs_for_step(inputs: dict, step: dict) -> dict:
 
 
 def _missing_live_fields(connector_id: str, inputs: dict) -> list[str]:
+    dynamic_capability = _find_dynamic_capability(connector_id)
+    if dynamic_capability and dynamic_capability.get("source") == "openapi":
+        missing = []
+        if not (inputs.get("server_url") or dynamic_capability.get("server_url")):
+            missing.append("server_url")
+        for name in str(dynamic_capability.get("path", "")).split("{")[1:]:
+            field = name.split("}", 1)[0]
+            if inputs.get(field) in (None, ""):
+                missing.append(field)
+        if dynamic_capability.get("method") != "GET" and not any(key in inputs for key in ("body", "json")):
+            missing.append("body")
+        return missing
+    if dynamic_capability and dynamic_capability.get("source") == "mcp":
+        return [] if (inputs.get("server_url") or dynamic_capability.get("server_url")) else ["server_url"]
     aliases = {
         "stripe.create_refund": {"charge_or_payment_intent": ("charge_or_payment_intent", "charge", "payment_intent")},
         "zendesk.create_ticket": {"body": ("body", "description", "comment")},
@@ -2031,6 +2107,23 @@ def _safe_request_preview(request_spec: dict) -> dict:
     }
 
 
+def _find_dynamic_capability(capability_id: str) -> dict | None:
+    return next((item for item in _all_capabilities() if item.get("id") == capability_id), None)
+
+
+def _fill_path_template(path: str, inputs: dict) -> tuple[str, list[str]]:
+    missing = []
+    rendered = path
+    for part in path.split("{")[1:]:
+        key = part.split("}", 1)[0]
+        value = inputs.get(key)
+        if value in (None, ""):
+            missing.append(key)
+        else:
+            rendered = rendered.replace("{" + key + "}", quote(str(value), safe=""))
+    return rendered, missing
+
+
 def _redact_sensitive(value: str | None, secret: str | None = None) -> str | None:
     if value is None:
         return None
@@ -2048,6 +2141,31 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
     headers = {"Accept": "application/json"}
     if secret:
         headers["Authorization"] = f"Bearer {secret}"
+    dynamic_capability = _find_dynamic_capability(connector_id)
+    if dynamic_capability and dynamic_capability.get("source") == "openapi":
+        method = dynamic_capability.get("method", "GET")
+        server_url = str(inputs.get("server_url") or dynamic_capability.get("server_url") or "").rstrip("/")
+        path, missing_path = _fill_path_template(str(dynamic_capability.get("path", "")), inputs)
+        if missing_path or not server_url:
+            return {
+                "method": method,
+                "url": f"connector://openapi/{connector_id}",
+                "headers": headers,
+                "body": json.dumps({"missing_path_fields": missing_path, "missing_server_url": not bool(server_url)}).encode("utf-8"),
+            }
+        query = inputs.get("query", {}) if isinstance(inputs.get("query"), dict) else {}
+        url = f"{server_url}{path}"
+        if method == "GET" and query:
+            url = f"{url}?{urlencode(query)}"
+        body = None if method == "GET" else (inputs.get("body") or inputs.get("json") or inputs)
+        return _json_request(method, url, headers, body if method != "GET" else None)
+    if dynamic_capability and dynamic_capability.get("source") == "mcp":
+        server_url = str(inputs.get("server_url") or dynamic_capability.get("server_url") or "").strip()
+        if not server_url:
+            return {"method": "POST", "url": f"connector://mcp/{connector_id}", "headers": headers, "body": None}
+        tool_name = dynamic_capability.get("tool_name") or connector_id.split(".", 1)[1]
+        body = {"jsonrpc": "2.0", "id": _stable_id("mcp_call", {"tool": tool_name}), "method": "tools/call", "params": {"name": tool_name, "arguments": inputs.get("arguments", inputs)}}
+        return _json_request("POST", server_url, headers, body)
     if connector_id == "slack.create_channel":
         body = {"name": inputs.get("name"), "is_private": bool(inputs.get("is_private", False))}
         return _json_request("POST", "https://slack.com/api/conversations.create", headers, body)
@@ -2182,7 +2300,8 @@ def _connector_execution_plan(spec: dict, step: dict, inputs: dict | None = None
     step_inputs = _inputs_for_step(inputs or {}, step)
     missing_fields = _missing_live_fields(connector_id, step_inputs)
     secret = _secret_for_service(service)
-    credentials_ready = service in {"http", "schema", "approval"} or bool(secret)
+    dynamic_capability = _find_dynamic_capability(connector_id)
+    credentials_ready = service in {"http", "schema", "approval"} or bool(secret) or not (dynamic_capability or {}).get("requires_auth")
     approval_ready = not step.get("approval_required") or approved_override or _has_approved_step(spec["id"], step)
     request_preview = None
     provider_endpoint_ready = True
@@ -2236,6 +2355,38 @@ def _runtime_execution_plan(spec_id: str, inputs: dict | None = None, approved: 
     }
 
 
+def _credential_requirements_for_spec(spec_id: str) -> dict:
+    spec = _get_automation_spec(spec_id)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Automation spec not found")
+    services = []
+    seen = set()
+    for connector in spec.get("connectors", []):
+        service = connector.get("service") or connector.get("id", "").split(".", 1)[0]
+        if not service or service in seen or service in {"schema", "approval", "http"}:
+            continue
+        seen.add(service)
+        info = SUPPORTED_SERVICES.get(service, {})
+        env = _env_status(info.get("env_vars", connector.get("required_env", [])))
+        has_vault = service in _credential_services()
+        services.append({
+            "service": service,
+            "name": info.get("name", service),
+            "connector_ids": [item["id"] for item in spec.get("connectors", []) if (item.get("service") or item.get("id", "").split(".", 1)[0]) == service],
+            "required_env": list(info.get("env_vars", connector.get("required_env", []))),
+            "env_status": env,
+            "vault_credential": has_vault,
+            "ready": env["configured"] or has_vault,
+            "oauth_supported": service in _oauth_specs(),
+        })
+    return {
+        "spec_id": spec_id,
+        "ready": all(item["ready"] for item in services),
+        "requirements": services,
+        "missing": [item for item in services if not item["ready"]],
+    }
+
+
 def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_override: bool = False) -> tuple[str, dict, str | None]:
     connector_id = step["connector_id"]
     service = connector_id.split(".", 1)[0]
@@ -2249,7 +2400,9 @@ def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_
         return "blocked", {"live_call_performed": False, "missing_fields": missing_fields}, None
 
     secret = _secret_for_service(service)
-    if service not in {"http", "schema", "approval"} and not secret:
+    dynamic_capability = _find_dynamic_capability(connector_id)
+    auth_required = bool((dynamic_capability or {}).get("requires_auth"))
+    if service not in {"http", "schema", "approval"} and not secret and (not dynamic_capability or auth_required):
         return "blocked", {"live_call_performed": False, "missing": "credentials"}, None
 
     request_spec = _connector_live_request(connector_id, step_inputs, secret)
@@ -2870,11 +3023,31 @@ def _repair_runtime_run(run_id: str) -> dict:
                 "message": "Keep this step paused until the business owner approves the preview.",
             })
         elif step["error"]:
+            error_text = step["error"] or ""
+            lower_error = error_text.lower()
+            classification = "provider_error"
+            patch = "Inspect provider response and adjust connector inputs."
+            if "401" in error_text or "403" in error_text or "unauthorized" in lower_error:
+                classification = "auth_error"
+                patch = "Rotate or reconnect credentials, then run a read-only connector probe."
+            elif "404" in error_text or "not found" in lower_error:
+                classification = "endpoint_or_record_missing"
+                patch = "Verify imported endpoint path, base URL, and record identifiers."
+            elif "timeout" in lower_error:
+                classification = "timeout"
+                patch = "Retry with exponential backoff or increase connector timeout."
             actions.append({
                 "type": "debug_error",
+                "classification": classification,
                 "step_id": step["step_id"],
                 "connector_id": step["connector_id"],
                 "message": step["error"],
+                "patch_suggestion": patch,
+                "retest": {
+                    "type": "execution_plan",
+                    "run_id": run_id,
+                    "step_id": step["step_id"],
+                },
             })
     if not actions:
         actions.append({
@@ -2896,6 +3069,23 @@ def _repair_runtime_run(run_id: str) -> dict:
     conn.commit()
     conn.close()
     return record
+
+
+async def _retest_repair(run_id: str) -> dict:
+    run = next((item for item in _list_runtime_runs(limit=100) if item["id"] == run_id), None)
+    if not run:
+        raise HTTPException(status_code=404, detail="Runtime run not found")
+    plan = _runtime_execution_plan(run["spec_id"], run.get("input", {}), approved=False)
+    repair = _repair_runtime_run(run_id)
+    result = {
+        "run_id": run_id,
+        "plan": plan,
+        "repair": repair,
+        "status": "ready" if plan["ready"] else "blocked",
+        "created_at": _now_iso(),
+    }
+    _record_observability_event("repair", "info", "repair_retested", run_id, {"status": result["status"], "blockers": plan["blockers"]})
+    return result
 
 
 async def _run_hr_onboarding_demo(prompt: str | None = None) -> dict:
@@ -3441,6 +3631,25 @@ def _inline_app_preview(files: dict[str, str]) -> str:
     return html
 
 
+def _app_build_qa(files: dict[str, str], prompt: str) -> dict:
+    html = files.get("index.html", "")
+    css = files.get("styles.css", "")
+    js = files.get("app.js", "")
+    checks = [
+        {"id": "entry_html", "label": "HTML entry exists", "status": "pass" if "<html" in html.lower() else "fail"},
+        {"id": "responsive_viewport", "label": "Responsive viewport configured", "status": "pass" if "viewport" in html else "warn"},
+        {"id": "interactive_js", "label": "Interactive JavaScript present", "status": "pass" if ("addEventListener" in js or "<script" in html) else "warn"},
+        {"id": "no_external_iframe", "label": "No iframe-based fake app", "status": "pass" if "<iframe" not in html.lower() else "fail"},
+        {"id": "stable_layout", "label": "Stable layout constraints", "status": "pass" if ("aspect-ratio" in css or "max-width" in css or "grid" in css) else "warn"},
+    ]
+    if "tic tac toe" in prompt.lower():
+        checks.append({"id": "game_rules", "label": "Game rules implemented", "status": "pass" if "winningLine" in js and "score" in js else "fail"})
+    return {
+        "status": "pass" if all(item["status"] == "pass" for item in checks) else "needs_review",
+        "checks": checks,
+    }
+
+
 def _generate_app_build(prompt: str) -> dict:
     clean_prompt = prompt.strip()
     if not clean_prompt:
@@ -3465,6 +3674,7 @@ def _generate_app_build(prompt: str) -> dict:
         "entry": "index.html",
         "files": [{"path": path, "size": len(content)} for path, content in files.items()],
         "preview_html": _inline_app_preview(files),
+        "qa": _app_build_qa(files, clean_prompt),
         "created_at": _now_iso(),
         "status": "generated",
         "next_steps": [
@@ -3508,6 +3718,8 @@ def _extract_openapi_capabilities(spec: dict) -> list[dict]:
                 continue
             operation = operation if isinstance(operation, dict) else {}
             operation_id = operation.get("operationId") or f"{method}_{path}".strip("/").replace("/", "_").replace("{", "").replace("}", "")
+            request_body = operation.get("requestBody", {}) if isinstance(operation.get("requestBody"), dict) else {}
+            parameters = operation.get("parameters", []) if isinstance(operation.get("parameters"), list) else []
             capabilities_data.append({
                 "id": f"openapi.{operation_id}",
                 "label": operation.get("summary") or operation_id.replace("_", " ").title(),
@@ -3521,6 +3733,8 @@ def _extract_openapi_capabilities(spec: dict) -> list[dict]:
                 "path": path,
                 "server_url": server_url,
                 "operation_id": operation_id,
+                "parameters": parameters,
+                "request_body": request_body,
             })
     return capabilities_data
 
@@ -3611,6 +3825,7 @@ def _discover_capabilities(prompt: str, limit: int = 8, include_public: bool = T
 
 def _extract_mcp_capabilities(manifest: dict) -> list[dict]:
     tools = manifest.get("tools") or manifest.get("capabilities") or []
+    server_url = manifest.get("server_url") or manifest.get("url")
     capabilities_data = []
     for tool in tools if isinstance(tools, list) else []:
         if not isinstance(tool, dict):
@@ -3627,6 +3842,8 @@ def _extract_mcp_capabilities(manifest: dict) -> list[dict]:
             "description": tool.get("description", "MCP tool capability"),
             "dry_run": bool(tool.get("dry_run", True)),
             "source": "mcp",
+            "server_url": server_url,
+            "tool_name": name,
             "input_schema": tool.get("input_schema") or tool.get("schema"),
         })
     return capabilities_data
@@ -3701,6 +3918,25 @@ def _deployment_artifacts(workflow_id: str, target: str) -> dict:
                 "    return {'payload': payload, 'return_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}",
             ]),
         }
+    if target == "vercel_project":
+        return {
+            "vercel.json": json.dumps({
+                "buildCommand": "npm run build",
+                "outputDirectory": "dist",
+                "framework": "vite",
+            }, indent=2),
+            "api/run.py": "\n".join([
+                "from http.server import BaseHTTPRequestHandler",
+                "import json",
+                "",
+                "class handler(BaseHTTPRequestHandler):",
+                "    def do_POST(self):",
+                "        self.send_response(202)",
+                "        self.send_header('Content-Type', 'application/json')",
+                "        self.end_headers()",
+                "        self.wfile.write(json.dumps({'accepted': True}).encode())",
+            ]),
+        }
     return {
         "docker-run.sh": "\n".join([
             "#!/usr/bin/env bash",
@@ -3765,6 +4001,13 @@ def _deployment_provider_health() -> list[dict]:
                 "label": "Render API key",
                 "status": "pass" if env["configured"] or "render" in credential_services else "warn",
                 "detail": "Render API key available" if env["configured"] or "render" in credential_services else "Add RENDER_API_KEY or store a render credential",
+            })
+        elif target["id"] == "vercel_project":
+            checks.append({
+                "id": "vercel_token",
+                "label": "Vercel token",
+                "status": "pass" if env["configured"] or "vercel" in credential_services else "warn",
+                "detail": "Vercel token available" if env["configured"] or "vercel" in credential_services else "Add VERCEL_TOKEN or store a vercel credential",
             })
         elif target["id"] == "webhook_runtime":
             checks.append({
@@ -3886,6 +4129,14 @@ def _provider_request_for_plan(plan_id: str, plan: dict) -> dict:
             "requires_confirmation": True,
             "artifact_names": list(artifacts.keys()),
         }
+    if target == "vercel_project":
+        return {
+            "provider": "vercel",
+            "operation": "create_deployment",
+            "workflow_id": workflow_id,
+            "requires_confirmation": True,
+            "artifact_names": list(artifacts.keys()),
+        }
     return {
         "provider": "local",
         "operation": "prepare_local_docker_command",
@@ -3904,6 +4155,9 @@ def _record_deployment_job(plan_id: str, plan: dict, mode: str = "dry_run") -> d
         "message": "Provider request prepared. External deploy actions require explicit user confirmation.",
         "live_call_performed": False,
     }
+    if mode == "live" and not blockers:
+        provider_response = _perform_deployment_dispatch(provider_request)
+        status = "deployed" if provider_response.get("status") == "succeeded" else provider_response.get("status", "failed")
     job = {
         "id": _stable_id("deploy_job", {"plan_id": plan_id, "mode": mode}),
         "plan_id": plan_id,
@@ -3939,6 +4193,33 @@ def _record_deployment_job(plan_id: str, plan: dict, mode: str = "dry_run") -> d
     conn.commit()
     conn.close()
     return job
+
+
+def _perform_deployment_dispatch(provider_request: dict) -> dict:
+    provider = provider_request.get("provider")
+    if provider == "local":
+        return {
+            "status": "ready_for_local_command",
+            "live_call_performed": False,
+            "command": provider_request.get("command", "docker compose up --build"),
+            "message": "Local Docker dispatch is prepared. Run the command on the host where Docker is available.",
+        }
+    if provider in {"github", "render", "vercel"}:
+        token_env = {"github": "GITHUB_TOKEN", "render": "RENDER_API_KEY", "vercel": "VERCEL_TOKEN"}[provider]
+        if not os.getenv(token_env) and provider not in _credential_services():
+            return {
+                "status": "blocked",
+                "live_call_performed": False,
+                "missing_env": token_env,
+                "message": f"{provider} deployment requires {token_env} or a stored {provider} credential.",
+            }
+        return {
+            "status": "ready_for_provider_api",
+            "live_call_performed": False,
+            "message": "Provider credentials are available. API execution is intentionally queued behind explicit provider-specific confirmation.",
+            "provider_request": provider_request,
+        }
+    return {"status": "unsupported_provider", "live_call_performed": False, "message": f"No dispatcher for {provider}"}
 
 
 def _list_deployment_jobs() -> list[dict]:
@@ -4552,6 +4833,12 @@ async def spec_exports(spec_id: str):
     return {"exports": _list_workflow_exports(spec_id)}
 
 
+@app.get("/api/specs/{spec_id}/credentials")
+async def spec_credentials(spec_id: str):
+    """Return connector credentials required before this spec can run live."""
+    return _credential_requirements_for_spec(spec_id)
+
+
 @app.post("/api/specs/{spec_id}/export")
 async def export_spec(spec_id: str, body: dict | None = None):
     """Export a canonical spec to a target workflow platform format."""
@@ -4592,6 +4879,12 @@ async def execute_live_runtime_spec(spec_id: str, body: dict | None = None):
 async def repair_runtime_run(run_id: str):
     """Convert a blocked or failed runtime run into concrete repair actions."""
     return {"repair": _repair_runtime_run(run_id)}
+
+
+@app.post("/api/runtime/runs/{run_id}/repair/retest")
+async def retest_runtime_repair(run_id: str):
+    """Re-run readiness planning after a repair so the user sees what is still blocked."""
+    return {"retest": await _retest_repair(run_id)}
 
 
 @app.get("/api/observability")
@@ -4643,6 +4936,27 @@ async def app_builder_generate(body: dict):
     return {"build": _generate_app_build(str(body.get("prompt", "")))}
 
 
+@app.get("/api/app-builder/builds/{build_id}/download")
+async def app_builder_download(build_id: str):
+    """Download a generated app-builder artifact as a zip package."""
+    build_dir = os.path.abspath(os.path.join(APP_BUILDS_DIR, build_id))
+    root = os.path.abspath(APP_BUILDS_DIR)
+    if not build_dir.startswith(root) or not os.path.isdir(build_dir):
+        raise HTTPException(status_code=404, detail="App build not found")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for base, _dirs, files in os.walk(build_dir):
+            for file_name in files:
+                full_path = os.path.join(base, file_name)
+                archive.write(full_path, os.path.relpath(full_path, build_dir))
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{build_id}.zip"'},
+    )
+
+
 @app.get("/api/templates")
 async def templates():
     """List reusable automation templates."""
@@ -4669,6 +4983,11 @@ async def run_queue():
     return {"queue": _list_run_queue()}
 
 
+@app.get("/api/queue")
+async def queue_list():
+    return {"queue": _list_run_queue()}
+
+
 @app.get("/api/runs/queue/worker")
 async def queue_worker_status():
     return {
@@ -4677,6 +4996,11 @@ async def queue_worker_status():
         "batch_size": int(os.getenv("FORGEFLOW_QUEUE_WORKER_BATCH", "5")),
         "due": _due_queue_items(limit=20),
     }
+
+
+@app.get("/api/queue/worker")
+async def queue_worker_status_alias():
+    return await queue_worker_status()
 
 
 @app.post("/api/runs/queue")
@@ -4692,8 +5016,18 @@ async def enqueue_run(body: dict):
     )
 
 
+@app.post("/api/queue")
+async def enqueue_run_alias(body: dict):
+    return await enqueue_run(body)
+
+
 @app.post("/api/runs/queue/{queue_id}/process")
 async def process_run_queue_item(queue_id: str):
+    return await _process_queue_item(queue_id)
+
+
+@app.post("/api/queue/{queue_id}/process")
+async def process_run_queue_item_alias(queue_id: str):
     return await _process_queue_item(queue_id)
 
 
@@ -4701,6 +5035,22 @@ async def process_run_queue_item(queue_id: str):
 async def process_due_run_queue(body: dict | None = None):
     body = body or {}
     return await _process_due_queue(limit=int(body.get("limit", 5)))
+
+
+@app.post("/api/queue/process-due")
+async def process_due_run_queue_alias(body: dict | None = None):
+    return await process_due_run_queue(body)
+
+
+@app.post("/api/runs/queue/recover-stale")
+async def recover_stale_run_queue(body: dict | None = None):
+    body = body or {}
+    return _recover_stale_queue_items(max_age_seconds=int(body.get("max_age_seconds", 600)))
+
+
+@app.post("/api/queue/recover-stale")
+async def recover_stale_run_queue_alias(body: dict | None = None):
+    return await recover_stale_run_queue(body)
 
 
 @app.get("/api/approvals")
@@ -5070,6 +5420,8 @@ async def discover_mcp_adapter(body: dict):
     """Accept a discovered MCP server manifest and ingest its tools as capabilities."""
     server_url = str(body.get("server_url", "")).strip()
     manifest = body.get("manifest") or body
+    if server_url and isinstance(manifest, dict):
+        manifest = {**manifest, "server_url": server_url}
     ingestion = await ingest_mcp(manifest)
     return {"server_url": server_url, "ingestion": ingestion, "dynamic_capabilities": ingestion["capabilities"]}
 

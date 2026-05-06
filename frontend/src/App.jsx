@@ -8,6 +8,7 @@ import {
   ClipboardCheck,
   Cloud,
   Database,
+  Download,
   FileSpreadsheet,
   Gauge,
   Gamepad2,
@@ -560,6 +561,10 @@ function AppBuilderView({ builds, onBuildsRefresh }) {
               <ReadinessRow label="Detected lane" value={latest.intent?.lane || 'app_builder'} ok={latest.intent?.lane === 'app_builder'} />
               <ReadinessRow label="Runnable artifact" value={latest.entry} ok />
               <ReadinessRow label="Generated files" value={String(latest.files?.length || 0)} ok />
+              <ReadinessRow label="QA checks" value={latest.qa?.status || 'recorded'} ok={latest.qa?.status === 'pass'} />
+              <a href={`${API_URL}/api/app-builder/builds/${latest.id}/download`} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">
+                <Download size={14} /> Download package
+              </a>
             </div>
           )}
         </div>
@@ -595,6 +600,11 @@ function AppBuilderView({ builds, onBuildsRefresh }) {
             <div className="mt-4 space-y-2">
               {(latest.next_steps || []).map((step) => <ReadinessRow key={step} label={step} value="next" ok={step.includes('Preview')} />)}
             </div>
+            {latest.qa?.checks?.length ? (
+              <div className="mt-5 space-y-2">
+                {latest.qa.checks.map((check) => <ReadinessRow key={check.id} label={check.label} value={check.status} ok={check.status === 'pass'} />)}
+              </div>
+            ) : null}
           </div>
         </div>
       )}
@@ -1622,6 +1632,7 @@ function DeploymentsView({ targets, plans, onPlansRefresh }) {
 function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh }) {
   const [searchPrompt, setSearchPrompt] = useState('Find an API to create customer support tickets and update CRM contacts.')
   const [discovery, setDiscovery] = useState(null)
+  const [openApiUrl, setOpenApiUrl] = useState('')
   const [openApiText, setOpenApiText] = useState('{\n  "openapi": "3.0.0",\n  "info": { "title": "HR Platform", "version": "1.0" },\n  "paths": {\n    "/candidates": { "get": { "operationId": "listCandidates", "summary": "List candidates" } },\n    "/employees": { "post": { "operationId": "createEmployee", "summary": "Create employee" } }\n  }\n}')
   const [mcpText, setMcpText] = useState('{\n  "name": "hr-records-mcp",\n  "tools": [\n    { "name": "lookup_employee", "description": "Find an employee by email", "input_schema": { "email": "string" } },\n    { "name": "create_onboarding_task", "description": "Create an onboarding task", "input_schema": { "employee_id": "string" } }\n  ]\n}')
   const [message, setMessage] = useState(null)
@@ -1683,6 +1694,25 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
     }
   }
 
+  const importOpenApiUrl = async () => {
+    setMessage(null)
+    setError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/openapi/import-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: openApiUrl }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setMessage(`${payload.name} imported ${payload.capabilities.length} capabilities from URL`)
+      onCapabilitiesRefresh()
+      onIngestionsRefresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -1736,6 +1766,10 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
       <div className="grid gap-4 xl:grid-cols-2">
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
           <h3 className="text-sm font-semibold">OpenAPI upload/import</h3>
+          <div className="mt-4 grid gap-2 md:grid-cols-[1fr_auto]">
+            <input value={openApiUrl} onChange={(event) => setOpenApiUrl(event.target.value)} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="https://provider.example/openapi.json" />
+            <button onClick={importOpenApiUrl} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Import URL</button>
+          </div>
           <textarea value={openApiText} onChange={(event) => setOpenApiText(event.target.value)} rows={14} className="mt-4 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 font-mono text-xs outline-none focus:border-sky-400/50" />
           <button onClick={() => ingest('openapi')} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
             <Upload size={16} /> Import OpenAPI
@@ -1779,6 +1813,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
   const [validations, setValidations] = useState([])
   const [repairs, setRepairs] = useState([])
   const [executionPlan, setExecutionPlan] = useState(null)
+  const [credentialRequirements, setCredentialRequirements] = useState(null)
   const [message, setMessage] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -1824,6 +1859,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       setValidations(result.validations)
       setRepairs(result.repair ? [result.repair] : [])
       setExecutionPlan(null)
+      setCredentialRequirements(null)
       setMessage(`Autopilot ${result.readiness.verdict}: ${result.spec.steps.length} steps, ${result.exports.length} exports, dry-run ${result.dry_run.status}`)
       onSpecsRefresh()
       onRunsRefresh()
@@ -1849,6 +1885,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setActiveSpec(payload.spec)
       setExecutionPlan(null)
+      setCredentialRequirements(null)
       setMessage(`Compiled ${payload.spec.steps.length} steps with ${payload.spec.approval_gates.length} approval gates`)
       onSpecsRefresh()
       onGapsRefresh()
@@ -1896,6 +1933,23 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       setExecutionPlan(payload.plan)
       setMessage(`Execution plan ${payload.plan.ready ? 'ready' : 'blocked'}: ${payload.plan.steps.length} connector steps checked`)
       onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const checkCredentials = async (specId) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/specs/${specId}/credentials`)
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setCredentialRequirements(payload)
+      setMessage(`Credentials ${payload.ready ? 'ready' : 'missing'}: ${payload.missing.length} connector groups need attention`)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -2050,6 +2104,11 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
               </button>
             )}
             {latestSpec && (
+              <button onClick={() => checkCredentials(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
+                <KeyRound size={16} /> Check credentials
+              </button>
+            )}
+            {latestSpec && (
               <button onClick={() => executeLiveSpec(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-4 py-2 text-sm text-amber-200 hover:bg-amber-400/15 disabled:opacity-50">
                 <ShieldCheck size={16} /> Execute approved live
               </button>
@@ -2157,6 +2216,27 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
           )}
         </div>
       </div>
+
+      {credentialRequirements && (
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold">Workflow credential requirements</h3>
+            <span className={`rounded-full px-2 py-1 text-[11px] ${credentialRequirements.ready ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{credentialRequirements.ready ? 'ready' : 'missing credentials'}</span>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {credentialRequirements.requirements.map((item) => (
+              <div key={item.service} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium">{item.name}</div>
+                  <span className={`rounded-full px-2 py-1 text-[11px] ${item.ready ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{item.ready ? 'ready' : 'connect'}</span>
+                </div>
+                <p className="mt-2 text-xs text-forge-muted">Needs {item.required_env.length ? item.required_env.join(', ') : 'stored credential'}</p>
+                {item.oauth_supported && <p className="mt-1 text-xs text-sky-200">OAuth supported in Connector Center</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {executionPlan && (
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
