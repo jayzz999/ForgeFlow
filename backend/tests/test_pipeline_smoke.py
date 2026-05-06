@@ -1167,3 +1167,91 @@ async def test_export_validate_and_repair_runtime_run(monkeypatch, tmp_path):
     assert validation["checks"][0]["status"] == "pass"
     assert repair["run_id"] == run["id"]
     assert any(action["type"] in {"credential_request", "approval_gate", "no_repair_needed"} for action in repair["actions"])
+
+
+def test_runtime_execution_plan_reports_fields_credentials_and_safe_request(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+
+    spec = main._store_automation_spec({
+        "goal": "Post a Slack onboarding announcement",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "slack.post_message", "service": "slack", "status": "needs_credentials"}],
+        "steps": [{
+            "id": "step_1",
+            "name": "Post Slack announcement",
+            "connector_id": "slack.post_message",
+            "purpose": "Announce a new hire",
+            "input_contract": {},
+            "output_contract": {},
+            "approval_required": True,
+        }],
+        "approval_gates": [{"step_id": "step_1", "risk": "external_write", "preview_required": True}],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "ready_for_live",
+    })
+
+    blocked = main._runtime_execution_plan(spec["id"], {}, approved=False)
+    assert blocked["ready"] is False
+    assert {item["type"] for item in blocked["blockers"]} >= {"missing_fields", "missing_credentials", "approval_required"}
+
+    main._store_credential("slack", "Unit Slack", "access_token", "xoxb-unit-token")
+    ready = main._runtime_execution_plan(
+        spec["id"],
+        {"slack.post_message": {"channel": "#people", "text": "Welcome Ada"}},
+        approved=True,
+    )
+
+    assert ready["ready"] is True
+    request = ready["steps"][0]["request_preview"]
+    assert request["method"] == "POST"
+    assert request["url"] == "https://slack.com/api/chat.postMessage"
+    assert "Authorization" not in request["headers"]
+    assert ready["steps"][0]["compensation"]["type"] == "provider_specific_compensation"
+
+
+@pytest.mark.asyncio
+async def test_live_execution_uses_per_step_inputs_without_leaking_secret(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    main._store_credential("slack", "Unit Slack", "access_token", "xoxb-unit-token")
+    spec = main._store_automation_spec({
+        "goal": "Post a Slack onboarding announcement",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "slack.post_message", "service": "slack", "status": "ready"}],
+        "steps": [{
+            "id": "step_1",
+            "name": "Post Slack announcement",
+            "connector_id": "slack.post_message",
+            "purpose": "Announce a new hire",
+            "input_contract": {},
+            "output_contract": {},
+            "approval_required": False,
+        }],
+        "approval_gates": [],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "ready_for_live",
+    })
+
+    def fake_urlopen(req, timeout=20):
+        raise RuntimeError(str(req.headers))
+
+    monkeypatch.setattr(main, "urlopen", fake_urlopen)
+
+    run = await main._live_run_automation_spec(
+        spec["id"],
+        {"step_1": {"channel": "#people", "text": "Welcome Ada"}},
+        approved=True,
+    )
+
+    assert run["status"] == "failed"
+    assert "xoxb-unit-token" not in (run["steps"][0]["error"] or "")

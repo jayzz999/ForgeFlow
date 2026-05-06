@@ -1778,6 +1778,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
   const [exports, setExports] = useState([])
   const [validations, setValidations] = useState([])
   const [repairs, setRepairs] = useState([])
+  const [executionPlan, setExecutionPlan] = useState(null)
   const [message, setMessage] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -1822,6 +1823,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       setExports(result.exports)
       setValidations(result.validations)
       setRepairs(result.repair ? [result.repair] : [])
+      setExecutionPlan(null)
       setMessage(`Autopilot ${result.readiness.verdict}: ${result.spec.steps.length} steps, ${result.exports.length} exports, dry-run ${result.dry_run.status}`)
       onSpecsRefresh()
       onRunsRefresh()
@@ -1846,6 +1848,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setActiveSpec(payload.spec)
+      setExecutionPlan(null)
       setMessage(`Compiled ${payload.spec.steps.length} steps with ${payload.spec.approval_gates.length} approval gates`)
       onSpecsRefresh()
       onGapsRefresh()
@@ -1870,6 +1873,28 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setMessage(`Dry-run ${payload.run.status}: ${payload.run.steps.length} step ledger entries`)
       onRunsRefresh()
+      onGapsRefresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const planExecution = async (specId) => {
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API_URL}/api/runtime/specs/${specId}/execution-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved: false, inputs: { source: 'runtime-ui-plan' } }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setExecutionPlan(payload.plan)
+      setMessage(`Execution plan ${payload.plan.ready ? 'ready' : 'blocked'}: ${payload.plan.steps.length} connector steps checked`)
       onGapsRefresh()
     } catch (err) {
       setError(err.message)
@@ -1973,6 +1998,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
       setExports(payload.exports)
       setValidations(payload.validations)
       setRepairs([payload.repair])
+      setExecutionPlan(null)
       setMessage(`HR onboarding demo generated ${payload.spec.steps.length} steps, ${payload.exports.length} exports, and a ${payload.run.status} dry-run`)
       onSpecsRefresh()
       onRunsRefresh()
@@ -2016,6 +2042,11 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
             {latestSpec && (
               <button onClick={() => dryRunSpec(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
                 <Play size={16} /> Dry-run spec
+              </button>
+            )}
+            {latestSpec && (
+              <button onClick={() => planExecution(latestSpec.id)} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:text-sky-200 disabled:opacity-50">
+                <ShieldCheck size={16} /> Plan live run
               </button>
             )}
             {latestSpec && (
@@ -2126,6 +2157,47 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
           )}
         </div>
       </div>
+
+      {executionPlan && (
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Live execution plan</h3>
+              <p className="mt-1 text-xs text-forge-muted">Credential, field, approval, request, and compensation checks before any provider call.</p>
+            </div>
+            <span className={`rounded-full px-2 py-1 text-[11px] ${executionPlan.ready ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>
+              {executionPlan.ready ? 'ready' : `${executionPlan.blockers.length} blockers`}
+            </span>
+          </div>
+          <div className="mt-4 grid gap-3 xl:grid-cols-2">
+            {executionPlan.steps.map((step) => (
+              <div key={step.step_id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium">{step.name}</div>
+                  <span className={`rounded-full px-2 py-1 text-[11px] ${step.ready ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{step.ready ? 'ready' : 'blocked'}</span>
+                </div>
+                <p className="mt-2 text-xs text-forge-muted">{step.connector_id}</p>
+                <div className="mt-3 grid gap-2 md:grid-cols-3">
+                  <ReadinessRow label="Credentials" value={step.credentials_ready ? 'ready' : 'missing'} ok={step.credentials_ready} />
+                  <ReadinessRow label="Approval" value={step.approval_required ? (step.approval_ready ? 'approved' : 'needed') : 'not needed'} ok={step.approval_ready} />
+                  <ReadinessRow label="Fields" value={step.missing_fields.length ? step.missing_fields.join(', ') : 'ready'} ok={!step.missing_fields.length} />
+                </div>
+                {step.request_preview && (
+                  <div className="mt-3 rounded-lg border border-forge-border bg-forge-panel p-3 text-xs text-forge-muted">
+                    <div>{step.request_preview.method} {step.request_preview.url}</div>
+                    <div className="mt-1">Headers: {step.request_preview.headers.join(', ') || 'none'}</div>
+                  </div>
+                )}
+                {step.blockers.length > 0 && (
+                  <div className="mt-3 space-y-1">
+                    {step.blockers.map((blocker, index) => <div key={`${step.step_id}-${blocker.type}-${index}`} className="text-xs text-amber-200">{blocker.type}</div>)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {(exports.length > 0 || repairs.length > 0) && (
         <div className="grid gap-4 xl:grid-cols-2">

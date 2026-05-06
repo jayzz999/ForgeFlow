@@ -1941,15 +1941,25 @@ def _has_approved_step(spec_id: str, step: dict) -> bool:
 
 def _required_live_fields(connector_id: str) -> list[str]:
     return {
+        "slack.create_channel": ["name"],
+        "gmail.create_draft": ["to", "subject", "body"],
+        "sheets.read_rows": ["range"],
+        "stripe.retrieve_payment": ["payment_intent"],
         "stripe.create_refund": ["charge_or_payment_intent"],
         "zendesk.create_ticket": ["subject", "body"],
         "calendar.create_event": ["summary", "start", "end"],
         "hubspot.create_contact": ["email"],
+        "hubspot.update_deal": ["deal_id", "properties"],
         "okta.assign_group": ["user_id", "group_id"],
+        "okta.create_user": ["profile"],
         "salesforce.create_record": ["object", "fields"],
+        "salesforce.update_record": ["object", "record_id", "fields"],
         "jira.create_issue": ["project_key", "summary"],
+        "jira.transition_issue": ["issue_id", "transition_id"],
         "notion.create_page": ["parent_id", "title"],
+        "notion.update_database": ["database_id", "properties"],
         "airtable.create_record": ["table", "fields"],
+        "airtable.update_record": ["table", "record_id", "fields"],
         "teams.post_message": ["channel_id", "text"],
         "slack.post_message": ["channel", "text"],
         "gmail.send_email": ["to", "subject", "body"],
@@ -1964,6 +1974,16 @@ def _input_value(inputs: dict, *names: str):
         if value not in (None, "", []):
             return value
     return None
+
+
+def _inputs_for_step(inputs: dict, step: dict) -> dict:
+    """Merge global run inputs with optional per-step or per-connector overrides."""
+    merged = dict(inputs or {})
+    for key in (step.get("connector_id"), step.get("connector_id", "").replace(".", "_"), step.get("id")):
+        value = (inputs or {}).get(key)
+        if isinstance(value, dict):
+            merged.update(value)
+    return merged
 
 
 def _missing_live_fields(connector_id: str, inputs: dict) -> list[str]:
@@ -1993,11 +2013,44 @@ def _json_request(method: str, url: str, headers: dict, body: dict | None = None
     }
 
 
+def _safe_request_preview(request_spec: dict) -> dict:
+    headers = request_spec.get("headers", {})
+    body = request_spec.get("body")
+    body_preview = None
+    if body:
+        try:
+            decoded = body.decode("utf-8", errors="replace")
+            body_preview = _json_loads(decoded, decoded[:1000])
+        except Exception:
+            body_preview = "<binary body>"
+    return {
+        "method": request_spec.get("method", "POST"),
+        "url": request_spec.get("url"),
+        "headers": sorted([key for key in headers if key.lower() != "authorization"]),
+        "body_preview": body_preview,
+    }
+
+
+def _redact_sensitive(value: str | None, secret: str | None = None) -> str | None:
+    if value is None:
+        return None
+    redacted = value
+    if secret:
+        redacted = redacted.replace(secret, "[redacted]")
+    for marker in ("Authorization", "authorization", "Bearer ", "SSWS "):
+        if marker in redacted:
+            redacted = redacted.replace(marker, f"{marker}[redacted] ")
+    return redacted[:1000]
+
+
 def _connector_live_request(connector_id: str, inputs: dict, secret: str | None) -> dict:
     service = connector_id.split(".", 1)[0]
     headers = {"Accept": "application/json"}
     if secret:
         headers["Authorization"] = f"Bearer {secret}"
+    if connector_id == "slack.create_channel":
+        body = {"name": inputs.get("name"), "is_private": bool(inputs.get("is_private", False))}
+        return _json_request("POST", "https://slack.com/api/conversations.create", headers, body)
     if connector_id == "stripe.create_refund":
         return {
             "method": "POST",
@@ -2008,8 +2061,15 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
                 **({"amount": str(inputs["amount"])} if inputs.get("amount") else {}),
             }).encode("utf-8"),
         }
+    if connector_id == "stripe.retrieve_payment":
+        payment_id = _input_value(inputs, "payment_intent", "charge", "charge_or_payment_intent")
+        path = "payment_intents" if str(payment_id).startswith("pi_") else "charges"
+        return {"method": "GET", "url": f"https://api.stripe.com/v1/{path}/{payment_id}", "headers": headers, "body": None}
     if connector_id == "zendesk.create_ticket":
         subdomain = os.getenv("ZENDESK_SUBDOMAIN", "")
+        if os.getenv("ZENDESK_EMAIL"):
+            token = base64.b64encode(f"{os.getenv('ZENDESK_EMAIL')}/token:{secret}".encode("utf-8")).decode("ascii")
+            headers = {"Accept": "application/json", "Authorization": f"Basic {token}"}
         body = {"ticket": {"subject": inputs.get("subject"), "comment": {"body": _input_value(inputs, "body", "description", "comment")}}}
         return _json_request("POST", f"https://{subdomain}.zendesk.com/api/v2/tickets.json", headers, body)
     if connector_id == "calendar.create_event":
@@ -2027,6 +2087,9 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
     if connector_id == "hubspot.create_deal":
         body = {"properties": {"dealname": inputs.get("dealname", inputs.get("name", "ForgeFlow deal")), **inputs.get("properties", {})}}
         return _json_request("POST", "https://api.hubapi.com/crm/v3/objects/deals", headers, body)
+    if connector_id == "hubspot.update_deal":
+        body = {"properties": inputs.get("properties", {})}
+        return _json_request("PATCH", f"https://api.hubapi.com/crm/v3/objects/deals/{inputs.get('deal_id')}", headers, body)
     if connector_id == "okta.assign_group":
         org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
         return {
@@ -2042,6 +2105,10 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
         instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
         object_name = inputs.get("object")
         return _json_request("POST", f"{instance_url}/services/data/v60.0/sobjects/{object_name}/", headers, inputs.get("fields", {}))
+    if connector_id == "salesforce.update_record":
+        instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
+        object_name = inputs.get("object")
+        return _json_request("PATCH", f"{instance_url}/services/data/v60.0/sobjects/{object_name}/{inputs.get('record_id')}", headers, inputs.get("fields", {}))
     if connector_id == "jira.create_issue":
         base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
         auth = base64.b64encode(f"{os.getenv('JIRA_EMAIL', '')}:{secret}".encode("utf-8")).decode("ascii")
@@ -2050,13 +2117,25 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
         if inputs.get("description"):
             body["fields"]["description"] = inputs["description"]
         return _json_request("POST", f"{base_url}/rest/api/3/issue", jira_headers, body)
+    if connector_id == "jira.transition_issue":
+        base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
+        auth = base64.b64encode(f"{os.getenv('JIRA_EMAIL', '')}:{secret}".encode("utf-8")).decode("ascii")
+        body = {"transition": {"id": str(inputs.get("transition_id"))}}
+        return _json_request("POST", f"{base_url}/rest/api/3/issue/{inputs.get('issue_id')}/transitions", {"Accept": "application/json", "Authorization": f"Basic {auth}"}, body)
     if connector_id == "notion.create_page":
         body = {"parent": {"page_id": inputs.get("parent_id")}, "properties": {"title": {"title": [{"text": {"content": inputs.get("title")}}]}}}
         return _json_request("POST", "https://api.notion.com/v1/pages", {**headers, "Notion-Version": "2022-06-28"}, body)
+    if connector_id == "notion.update_database":
+        body = {"properties": inputs.get("properties", {})}
+        return _json_request("PATCH", f"https://api.notion.com/v1/databases/{inputs.get('database_id')}", {**headers, "Notion-Version": "2022-06-28"}, body)
     if connector_id == "airtable.create_record":
         base_id = os.getenv("AIRTABLE_BASE_ID", "")
         body = {"fields": inputs.get("fields", {})}
         return _json_request("POST", f"https://api.airtable.com/v0/{base_id}/{quote(str(inputs.get('table')))}", headers, body)
+    if connector_id == "airtable.update_record":
+        base_id = os.getenv("AIRTABLE_BASE_ID", "")
+        body = {"fields": inputs.get("fields", {})}
+        return _json_request("PATCH", f"https://api.airtable.com/v0/{base_id}/{quote(str(inputs.get('table')))}/{inputs.get('record_id')}", headers, body)
     if connector_id == "teams.post_message":
         body = {"body": {"contentType": "html", "content": _input_value(inputs, "text", "body", "message")}}
         return _json_request("POST", f"https://graph.microsoft.com/v1.0/teams/{inputs.get('team_id')}/channels/{inputs.get('channel_id')}/messages", headers, body)
@@ -2068,11 +2147,20 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
             f"To: {inputs.get('to')}\r\nSubject: {inputs.get('subject')}\r\n\r\n{_input_value(inputs, 'body', 'message')}".encode("utf-8")
         ).decode("ascii")
         return _json_request("POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", headers, {"raw": raw})
+    if connector_id == "gmail.create_draft":
+        raw = base64.urlsafe_b64encode(
+            f"To: {inputs.get('to')}\r\nSubject: {inputs.get('subject')}\r\n\r\n{_input_value(inputs, 'body', 'message')}".encode("utf-8")
+        ).decode("ascii")
+        return _json_request("POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts", headers, {"message": {"raw": raw}})
     if connector_id == "sheets.append_row":
         sheet_id = os.getenv("GOOGLE_SHEET_ID", inputs.get("sheet_id", ""))
         range_name = quote(str(inputs.get("range", "Sheet1!A1")), safe="")
         body = {"values": inputs.get("values", [])}
         return _json_request("POST", f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}:append?valueInputOption=USER_ENTERED", headers, body)
+    if connector_id == "sheets.read_rows":
+        sheet_id = os.getenv("GOOGLE_SHEET_ID", inputs.get("sheet_id", ""))
+        range_name = quote(str(inputs.get("range", "Sheet1!A1")), safe="")
+        return {"method": "GET", "url": f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}", "headers": headers, "body": None}
     if connector_id == "http.request":
         return {
             "method": inputs.get("method", "GET"),
@@ -2088,14 +2176,75 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
     }
 
 
+def _connector_execution_plan(spec: dict, step: dict, inputs: dict | None = None, approved_override: bool = False) -> dict:
+    connector_id = step["connector_id"]
+    service = connector_id.split(".", 1)[0]
+    step_inputs = _inputs_for_step(inputs or {}, step)
+    missing_fields = _missing_live_fields(connector_id, step_inputs)
+    secret = _secret_for_service(service)
+    credentials_ready = service in {"http", "schema", "approval"} or bool(secret)
+    approval_ready = not step.get("approval_required") or approved_override or _has_approved_step(spec["id"], step)
+    request_preview = None
+    provider_endpoint_ready = True
+    if not missing_fields and credentials_ready and service not in {"schema", "approval"}:
+        request_spec = _connector_live_request(connector_id, step_inputs, secret)
+        request_preview = _safe_request_preview(request_spec)
+        provider_endpoint_ready = not str(request_spec.get("url", "")).startswith("connector://")
+    blockers = []
+    if missing_fields:
+        blockers.append({"type": "missing_fields", "fields": missing_fields})
+    if not credentials_ready:
+        blockers.append({"type": "missing_credentials", "service": service})
+    if not approval_ready:
+        blockers.append({"type": "approval_required", "step_id": step["id"]})
+    if not provider_endpoint_ready:
+        blockers.append({"type": "missing_provider_endpoint", "connector_id": connector_id})
+    return {
+        "step_id": step["id"],
+        "name": step.get("name"),
+        "connector_id": connector_id,
+        "service": service,
+        "ready": not blockers,
+        "approval_required": bool(step.get("approval_required")),
+        "approval_ready": approval_ready,
+        "credentials_ready": credentials_ready,
+        "required_fields": _required_live_fields(connector_id),
+        "missing_fields": missing_fields,
+        "request_preview": request_preview,
+        "compensation": _compensation_for_step(connector_id, step_inputs),
+        "blockers": blockers,
+    }
+
+
+def _runtime_execution_plan(spec_id: str, inputs: dict | None = None, approved: bool = False) -> dict:
+    spec = _get_automation_spec(spec_id)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Automation spec not found")
+    steps = [_connector_execution_plan(spec, step, inputs or {}, approved) for step in spec["steps"]]
+    blockers = [blocker for step in steps for blocker in step["blockers"]]
+    return {
+        "spec_id": spec_id,
+        "ready": not blockers,
+        "mode": "approved_live" if approved else "pre_approval",
+        "steps": steps,
+        "blockers": blockers,
+        "next_actions": [
+            "Provide required input fields.",
+            "Connect missing credentials in the Connector Center.",
+            "Approve external-write steps before live execution.",
+        ] if blockers else ["Ready for approved live execution."],
+    }
+
+
 def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_override: bool = False) -> tuple[str, dict, str | None]:
     connector_id = step["connector_id"]
     service = connector_id.split(".", 1)[0]
+    step_inputs = _inputs_for_step(inputs, step)
     if step.get("approval_required") and not (approved_override or _has_approved_step(spec["id"], step)):
         return "waiting_for_approval", {"live_call_performed": False, "approval_required": True}, None
 
     required = _required_live_fields(connector_id)
-    missing_fields = _missing_live_fields(connector_id, inputs)
+    missing_fields = _missing_live_fields(connector_id, step_inputs)
     if missing_fields:
         return "blocked", {"live_call_performed": False, "missing_fields": missing_fields}, None
 
@@ -2103,7 +2252,7 @@ def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_
     if service not in {"http", "schema", "approval"} and not secret:
         return "blocked", {"live_call_performed": False, "missing": "credentials"}, None
 
-    request_spec = _connector_live_request(connector_id, inputs, secret)
+    request_spec = _connector_live_request(connector_id, step_inputs, secret)
     if request_spec["url"].startswith("connector://"):
         return "blocked", {
             "live_call_performed": False,
@@ -2124,10 +2273,10 @@ def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_
                 "live_call_performed": True,
                 "status_code": response.status,
                 "response": _json_loads(text, {"text": text}),
-                "compensation": _compensation_for_step(connector_id, inputs),
+                "compensation": _compensation_for_step(connector_id, step_inputs),
             }, None
     except Exception as exc:
-        return "failed", {"live_call_performed": True, "request_url": request_spec["url"]}, str(exc)
+        return "failed", {"live_call_performed": True, "request_url": request_spec["url"]}, _redact_sensitive(str(exc), secret)
 
 
 def _compensation_for_step(connector_id: str, inputs: dict) -> dict:
@@ -4421,6 +4570,13 @@ async def dry_run_runtime_spec(spec_id: str, body: dict | None = None):
     """Evaluate a canonical spec through adapter dry-run contracts without live external calls."""
     body = body or {}
     return {"run": await _dry_run_automation_spec(spec_id, body.get("inputs", {}))}
+
+
+@app.post("/api/runtime/specs/{spec_id}/execution-plan")
+async def runtime_execution_plan(spec_id: str, body: dict | None = None):
+    """Preview exact live connector readiness without sending external requests."""
+    body = body or {}
+    return {"plan": _runtime_execution_plan(spec_id, body.get("inputs", {}), approved=bool(body.get("approved")))}
 
 
 @app.post("/api/runtime/specs/{spec_id}/execute-live")
