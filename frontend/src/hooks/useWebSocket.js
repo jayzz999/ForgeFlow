@@ -1,15 +1,34 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
+const API_URL = import.meta.env.VITE_API_URL || WS_URL.replace(/^ws/, 'http')
 const MAX_RECONNECT_ATTEMPTS = 5
 const PIPELINE_TIMEOUT_MS = 180000 // 3 min timeout — pipeline should complete or clarify by then
+const LAST_WORKFLOW_KEY = 'forgeflow:lastWorkflowId'
+
+function readLastWorkflowId() {
+  try {
+    return window.localStorage.getItem(LAST_WORKFLOW_KEY)
+  } catch {
+    return null
+  }
+}
+
+function rememberLastWorkflowId(workflowId) {
+  try {
+    if (workflowId) window.localStorage.setItem(LAST_WORKFLOW_KEY, workflowId)
+    else window.localStorage.removeItem(LAST_WORKFLOW_KEY)
+  } catch {
+    // localStorage can be unavailable in locked-down browsers.
+  }
+}
 
 export function useWebSocket() {
   const [events, setEvents] = useState([])
   const [connected, setConnected] = useState(false)
   const [dag, setDag] = useState(null)
   const [code, setCode] = useState('')
-  const [phase, setPhase] = useState('idle')
+  const [phase, setPhase] = useState(() => readLastWorkflowId() ? 'deployed' : 'idle')
   const [discoveredApis, setDiscoveredApis] = useState([])
   const [debugHistory, setDebugHistory] = useState([])
   // Task 1: Incremental DAG steps
@@ -19,7 +38,7 @@ export function useWebSocket() {
   // Clarification state
   const [clarification, setClarification] = useState(null) // {questions, currentPlan, originalRequest}
   // Deployed workflow state
-  const [deployedWorkflowId, setDeployedWorkflowId] = useState(null)
+  const [deployedWorkflowId, setDeployedWorkflowId] = useState(() => readLastWorkflowId())
   const [generatedFiles, setGeneratedFiles] = useState([])
   // Sandbox execution output (from the pipeline run)
   const [sandboxOutput, setSandboxOutput] = useState(null) // {stdout, stderr, success, execution_time}
@@ -134,7 +153,10 @@ export function useWebSocket() {
 
     // Track deployed workflow — capture id + file list
     if (event_type === 'workflow.deployed' && data) {
-      if (data.workflow_id) setDeployedWorkflowId(data.workflow_id)
+      if (data.workflow_id) {
+        setDeployedWorkflowId(data.workflow_id)
+        rememberLastWorkflowId(data.workflow_id)
+      }
       if (data.files) setGeneratedFiles(data.files)
     }
 
@@ -244,6 +266,26 @@ export function useWebSocket() {
     }
   }, [connect, clearPipelineTimeout])
 
+  useEffect(() => {
+    if (deployedWorkflowId) return
+    let cancelled = false
+    fetch(`${API_URL}/api/workflows`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((payload) => {
+        if (cancelled) return
+        const latest = payload?.workflows?.[0]
+        if (latest?.id) {
+          setDeployedWorkflowId(latest.id)
+          setPhase('deployed')
+          rememberLastWorkflowId(latest.id)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [deployedWorkflowId])
+
   const sendMessage = useCallback((message) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -260,6 +302,7 @@ export function useWebSocket() {
       setNodeStatuses({})
       setClarification(null)
       setDeployedWorkflowId(null)
+      rememberLastWorkflowId(null)
       setGeneratedFiles([])
       setSandboxOutput(null)
       startPipelineTimeout()
@@ -309,6 +352,7 @@ export function useWebSocket() {
       setNodeStatuses({})
       setClarification(null)
       setDeployedWorkflowId(null)
+      rememberLastWorkflowId(null)
       setGeneratedFiles([])
       setSandboxOutput(null)
       startPipelineTimeout()
@@ -341,6 +385,7 @@ export function useWebSocket() {
     setNodeStatuses({})
     setClarification(null)
     setDeployedWorkflowId(null)
+    rememberLastWorkflowId(null)
     setGeneratedFiles([])
     setSandboxOutput(null)
     clearPipelineTimeout()

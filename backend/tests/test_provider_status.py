@@ -27,6 +27,13 @@ def test_provider_status_does_not_expose_secret_values(monkeypatch):
         "model": "local",
     }
     assert data["services"]["slack"]["configured"] is True
+    assert data["services"]["slack"]["oauth_supported"] is True
+    assert data["services"]["slack"]["oauth_ready"] is False
+    assert {
+        "SLACK_CLIENT_ID",
+        "SLACK_CLIENT_SECRET",
+        "SLACK_OAUTH_REDIRECT_URI",
+    } <= set(data["services"]["slack"]["oauth_missing_env"])
     serialized = response.text
     assert "secret-openai-key" not in serialized
     assert "secret-groq-key" not in serialized

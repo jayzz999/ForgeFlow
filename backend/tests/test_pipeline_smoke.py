@@ -869,6 +869,44 @@ async def test_eval_suite_records_quality_run(monkeypatch, tmp_path):
     assert runs[0]["id"] == result["id"]
 
 
+def test_runtime_run_audit_scores_safety_signals(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    run = {
+        "id": "runtime_run_unit",
+        "spec_id": "spec_unit",
+        "status": "waiting_for_approval",
+        "mode": "dry_run",
+        "input": {},
+        "output": {"live_call_performed": False},
+        "started_at": "2026-05-10T10:00:00Z",
+        "completed_at": "2026-05-10T10:00:01Z",
+        "steps": [
+            {
+                "id": "runtime_step_1",
+                "step_id": "step_1",
+                "connector_id": "slack.post_message",
+                "status": "waiting_for_approval",
+                "output": {"live_call_performed": False},
+                "error": None,
+            }
+        ],
+    }
+
+    audit = main._audit_runtime_run(run)
+
+    assert audit["kind"] == "runtime"
+    assert audit["score"] >= 0.8
+    assert "slack.post_message" in audit["connectors"]
+    assert {check["id"] for check in audit["checks"]} >= {
+        "connectors_detected",
+        "external_writes_gated",
+        "dry_run_safety",
+        "secret_redaction",
+    }
+
+
 def test_deployment_activation_is_recorded(monkeypatch, tmp_path):
     from backend import main
 
@@ -1171,6 +1209,71 @@ def test_connector_tests_are_recorded_without_exposing_secret(monkeypatch, tmp_p
     assert ready["status"] == "ready_to_probe"
     assert "sk_test_secret" not in str(tests)
     assert tests[0]["request"]["url"] == "https://api.stripe.com/v1/balance"
+
+
+def test_vault_metadata_completes_connector_provider_config(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_VAULT_KEY", "unit-test-vault-key")
+    monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+    main._store_credential(
+        "jira",
+        "Unit Jira",
+        "api_token",
+        "jira-secret-token",
+        {"base_url": "https://example.atlassian.net", "email": "dev@example.com"},
+    )
+    request = main._connector_live_request(
+        "jira.create_issue",
+        {"project_key": "ENG", "summary": "Follow up"},
+        main._secret_for_service("jira"),
+    )
+
+    assert request["url"] == "https://example.atlassian.net/rest/api/3/issue"
+    assert request["method"] == "POST"
+    assert "jira-secret-token" not in main._safe_request_preview(request)["headers"]
+
+
+def test_missing_provider_config_blocks_live_plan(monkeypatch, tmp_path):
+    from backend import main
+
+    monkeypatch.setattr(main, "PLATFORM_DB_PATH", str(tmp_path / "forgeflow_platform.db"))
+    monkeypatch.setenv("FORGEFLOW_VAULT_KEY", "unit-test-vault-key")
+    monkeypatch.delenv("OKTA_ORG_URL", raising=False)
+    main._store_credential("okta", "Unit Okta", "api_token", "okta-secret-token")
+
+    spec = main._store_automation_spec({
+        "goal": "Provision Okta access",
+        "trigger": {"type": "manual"},
+        "inputs": {},
+        "connectors": [{"id": "okta.assign_group", "service": "okta", "status": "ready"}],
+        "steps": [{
+            "id": "step_1",
+            "name": "Assign group",
+            "connector_id": "okta.assign_group",
+            "purpose": "Grant access",
+            "input_contract": {},
+            "output_contract": {},
+            "approval_required": False,
+        }],
+        "approval_gates": [],
+        "tests": [],
+        "deployment": {},
+        "questions": [],
+        "status": "ready_for_live",
+    })
+    plan = main._runtime_execution_plan(
+        spec["id"],
+        {"okta.assign_group": {"user_id": "00u123", "group_id": "00g123"}},
+        approved=True,
+    )
+
+    assert plan["ready"] is False
+    assert {"type": "missing_provider_endpoint", "connector_id": "okta.assign_group"} in plan["blockers"]
 
 
 @pytest.mark.asyncio

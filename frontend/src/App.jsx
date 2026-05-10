@@ -46,17 +46,11 @@ const NAV_ITEMS = [
   { id: 'builder', label: 'Builder', Icon: Workflow },
   { id: 'appbuilder', label: 'App Builder', Icon: Gamepad2 },
   { id: 'runtime', label: 'Runtime', Icon: Activity },
-  { id: 'judge', label: 'Judge Demo', Icon: Sparkles },
   { id: 'connectors', label: 'Connectors', Icon: Blocks },
-  { id: 'schemas', label: 'Schemas', Icon: FileSpreadsheet },
-  { id: 'approvals', label: 'Approvals', Icon: ClipboardCheck },
-  { id: 'triggers', label: 'Triggers', Icon: TimerReset },
-  { id: 'deployments', label: 'Deployments', Icon: Server },
   { id: 'runs', label: 'Run History', Icon: History },
   { id: 'ingestions', label: 'Ingestions', Icon: PlugZap },
   { id: 'evals', label: 'Evals', Icon: Gauge },
   { id: 'templates', label: 'Templates', Icon: Layers3 },
-  { id: 'roadmap', label: 'Roadmap', Icon: GitBranch },
 ]
 
 const API_URL = import.meta.env.VITE_API_URL || ''
@@ -97,8 +91,8 @@ function useApiResource(path, fallback) {
 function LogoMark() {
   return (
     <div className="flex items-center gap-3">
-      <div className="grid h-9 w-9 place-items-center rounded-lg border border-sky-400/30 bg-sky-400/15 text-sm font-bold text-sky-200 shadow-lg shadow-sky-950/30">
-        FF
+      <div className="grid h-9 w-9 place-items-center rounded-lg border border-sky-400/30 bg-sky-400/15 text-sky-200 shadow-lg shadow-sky-950/30">
+        <Workflow size={18} strokeWidth={2.2} />
       </div>
       <div>
         <div className="text-sm font-semibold text-forge-text">ForgeFlow</div>
@@ -136,6 +130,60 @@ function SectionTitle({ eyebrow, title, description }) {
   )
 }
 
+function LandingAutomationPreview() {
+  const steps = [
+    ['Prompt', 'HR onboarding request'],
+    ['Discover', 'Slack, Gmail, Sheets'],
+    ['Preflight', '2 credentials missing'],
+    ['Approve', 'External writes paused'],
+  ]
+  return (
+    <div className="landing-preview pointer-events-none absolute inset-y-24 right-0 hidden w-[50vw] max-w-3xl lg:block" aria-hidden="true">
+      <div className="landing-preview-shell absolute right-4 top-8 w-[min(48vw,680px)] rounded-lg border border-sky-300/20 bg-[#080d14]/88 p-4 shadow-2xl shadow-black/40">
+        <div className="mb-4 flex items-center justify-between border-b border-white/10 pb-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-sky-300">Live Plan</div>
+            <div className="mt-1 text-sm font-semibold text-white">New Hire Onboarding</div>
+          </div>
+          <div className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-3 py-1 text-[11px] text-emerald-200">dry-run safe</div>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-[1fr_0.8fr]">
+          <div className="rounded-lg border border-white/10 bg-black/24 p-4">
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-sky-200">
+              <Search size={14} /> Plain-English prompt
+            </div>
+            <p className="text-sm leading-6 text-slate-200">
+              Automate onboarding from an HR sheet. Draft welcome email, post Slack announcement, create IT request, append tracking row.
+            </p>
+          </div>
+          <div className="space-y-2 rounded-lg border border-white/10 bg-black/24 p-4">
+            {[
+              ['Schema Inspector', 'ready', true],
+              ['Slack', 'connected', true],
+              ['Gmail', 'needs OAuth', false],
+              ['Google Sheets', 'needs token', false],
+            ].map(([label, value, ok]) => (
+              <div key={label} className="flex items-center justify-between gap-3 text-xs">
+                <span className="text-slate-400">{label}</span>
+                <span className={ok ? 'text-emerald-300' : 'text-amber-300'}>{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3 grid gap-2 lg:grid-cols-4">
+          {steps.map(([title, body], index) => (
+            <div key={title} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <div className="mb-2 flex h-6 w-6 items-center justify-center rounded-md bg-sky-300 text-[11px] font-bold text-slate-950">{index + 1}</div>
+              <div className="text-xs font-semibold text-white">{title}</div>
+              <div className="mt-1 text-[11px] leading-4 text-slate-400">{body}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function LandingPage({ onOpenApp }) {
   return (
     <div className="min-h-screen bg-[#070a0f] text-forge-text">
@@ -157,14 +205,15 @@ function LandingPage({ onOpenApp }) {
       </header>
 
       <main>
-        <section className="relative min-h-[92vh] overflow-hidden pt-24">
+        <section className="relative min-h-[86vh] overflow-hidden pt-24">
           <div className="absolute inset-0 automation-field" aria-hidden="true" />
-          <div className="relative mx-auto grid min-h-[calc(92vh-6rem)] max-w-7xl content-center px-6 pb-16">
-            <div className="max-w-4xl">
+          <LandingAutomationPreview />
+          <div className="relative mx-auto grid min-h-[calc(86vh-6rem)] max-w-7xl content-center px-6 pb-16">
+            <div className="max-w-2xl">
               <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-sky-300/20 bg-black/30 px-3 py-1 text-xs text-sky-200">
                 <Sparkles size={14} /> Prompt to discovered systems to verified deployment
               </div>
-              <h1 className="max-w-5xl text-5xl font-semibold leading-[1.03] tracking-tight text-white md:text-7xl">
+              <h1 className="max-w-2xl text-5xl font-semibold leading-[1.03] tracking-tight text-white md:text-6xl">
                 Plain English to Production Automation
               </h1>
               <p className="mt-6 max-w-2xl text-base leading-7 text-slate-300 md:text-lg">
@@ -183,6 +232,18 @@ function LandingPage({ onOpenApp }) {
                 >
                   Explore platform <ChevronRight size={17} />
                 </a>
+              </div>
+              <div className="mt-8 grid max-w-2xl gap-2 text-xs text-slate-300 sm:grid-cols-3">
+                {[
+                  ['16', 'connector contracts'],
+                  ['dry-run', 'before provider writes'],
+                  ['approval', 'for risky actions'],
+                ].map(([value, label]) => (
+                  <div key={label} className="rounded-lg border border-white/10 bg-black/24 px-3 py-3">
+                    <div className="font-semibold text-white">{value}</div>
+                    <div className="mt-1 text-slate-400">{label}</div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
@@ -314,7 +375,7 @@ function DashboardView({ overview, providerStatus, onNavigate }) {
 }
 
 function PreflightPanel({ onBuild }) {
-  const [prompt, setPrompt] = useState('Automate HR onboarding from an uploaded Excel sheet, draft a welcome email, post a Slack announcement, and append tracking data.')
+  const [prompt, setPrompt] = useState('Automate HR onboarding from an uploaded Excel sheet, send a welcome email, post a Slack announcement, and append tracking data.')
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -430,11 +491,142 @@ function BuilderView(props) {
     sendModification,
     sendDemo,
     resetState,
+    initialPrompt,
   } = props
   const [showCode, setShowCode] = useState(true)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [liveReview, setLiveReview] = useState(null)
+  const [editedReviewActions, setEditedReviewActions] = useState([])
+  const [reviewError, setReviewError] = useState(null)
+  const [approvingLive, setApprovingLive] = useState(false)
+  const [liveRunResult, setLiveRunResult] = useState(null)
+  const liveRunResults = liveRunResult?.results || []
+  const liveRunSucceeded = liveRunResults.filter((item) => item.status === 'succeeded').length
+
+  const liveResultDetail = (item) => {
+    if (item.error) return typeof item.error === 'string' ? item.error : JSON.stringify(item.error)
+    if (item.response?.error) return item.response.error
+    if (item.status_code) return `HTTP ${item.status_code}`
+    return item.status
+  }
 
   const handleDownload = () => {
     if (deployedWorkflowId) window.open(`/api/workflows/${deployedWorkflowId}/download`, '_blank')
+  }
+
+  const loadReview = async () => {
+    if (!deployedWorkflowId) return
+    setReviewError(null)
+    setLiveRunResult(null)
+    try {
+      const res = await fetch(`${API_URL}/api/workflows/${deployedWorkflowId}/live-review`)
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setLiveReview(payload)
+      setEditedReviewActions((payload.actions || []).map((action) => ({
+        ...action,
+        preview: JSON.parse(JSON.stringify(action.preview || {})),
+      })))
+      setReviewOpen(true)
+    } catch (err) {
+      setReviewError(err.message)
+      setReviewOpen(true)
+    }
+  }
+
+  const approveLive = async () => {
+    if (!deployedWorkflowId || approvingLive) return
+    setApprovingLive(true)
+    setReviewError(null)
+    try {
+      const res = await fetch(`${API_URL}/api/workflows/${deployedWorkflowId}/approve-live`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved: true, actions: editedReviewActions }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
+      setLiveRunResult(payload)
+    } catch (err) {
+      setReviewError(err.message)
+    } finally {
+      setApprovingLive(false)
+    }
+  }
+
+  const updateReviewPreview = (index, key, value) => {
+    setEditedReviewActions((items) => items.map((item, itemIndex) => (
+      itemIndex === index ? { ...item, preview: { ...item.preview, [key]: value } } : item
+    )))
+  }
+
+  const updateSheetsRows = (index, value) => {
+    try {
+      const parsed = JSON.parse(value)
+      if (!Array.isArray(parsed)) throw new Error('Rows must be an array')
+      updateReviewPreview(index, 'values', parsed)
+      setReviewError(null)
+    } catch (err) {
+      setReviewError(`Sheets rows JSON is invalid: ${err.message}`)
+    }
+  }
+
+  const renderReviewEditor = (action, index) => {
+    const preview = action.preview || {}
+    const inputClass = 'mt-1 w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs text-forge-text outline-none focus:border-sky-400/50'
+    const labelClass = 'text-[11px] font-medium uppercase tracking-wide text-forge-muted'
+    if (action.type === 'gmail.create_draft' || action.type === 'gmail.send_email') {
+      return (
+        <div className="mt-3 space-y-3">
+          <label className="block">
+            <span className={labelClass}>To</span>
+            <input value={preview.to || ''} onChange={(event) => updateReviewPreview(index, 'to', event.target.value)} className={inputClass} />
+          </label>
+          <label className="block">
+            <span className={labelClass}>Subject</span>
+            <input value={preview.subject || ''} onChange={(event) => updateReviewPreview(index, 'subject', event.target.value)} className={inputClass} />
+          </label>
+          <label className="block">
+            <span className={labelClass}>Body</span>
+            <textarea value={preview.body || ''} onChange={(event) => updateReviewPreview(index, 'body', event.target.value)} rows={5} className={`${inputClass} resize-y leading-5`} />
+          </label>
+        </div>
+      )
+    }
+    if (action.type === 'slack.post_message') {
+      return (
+        <div className="mt-3 space-y-3">
+          <label className="block">
+            <span className={labelClass}>Channel</span>
+            <input value={preview.channel || ''} onChange={(event) => updateReviewPreview(index, 'channel', event.target.value)} className={inputClass} />
+          </label>
+          <label className="block">
+            <span className={labelClass}>Message</span>
+            <textarea value={preview.text || ''} onChange={(event) => updateReviewPreview(index, 'text', event.target.value)} rows={4} className={`${inputClass} resize-y leading-5`} />
+          </label>
+        </div>
+      )
+    }
+    if (action.type === 'sheets.append_row') {
+      return (
+        <div className="mt-3 space-y-3">
+          <label className="block">
+            <span className={labelClass}>Range</span>
+            <input value={preview.range || ''} onChange={(event) => updateReviewPreview(index, 'range', event.target.value)} className={inputClass} />
+          </label>
+          <label className="block">
+            <span className={labelClass}>Rows JSON</span>
+            <textarea
+              defaultValue={JSON.stringify(preview.values || [], null, 2)}
+              onBlur={(event) => updateSheetsRows(index, event.target.value)}
+              rows={8}
+              className={`${inputClass} resize-y font-mono leading-5`}
+            />
+          </label>
+        </div>
+      )
+    }
+    return <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] leading-4 text-forge-muted">{JSON.stringify(preview, null, 2)}</pre>
   }
 
   return (
@@ -446,9 +638,14 @@ function BuilderView(props) {
         </div>
         <div className="flex items-center gap-3">
           {phase === 'deployed' && deployedWorkflowId && (
-            <button onClick={handleDownload} className="inline-flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-400/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-400/20">
-              <Cloud size={14} /> Download Project
-            </button>
+            <>
+              <button onClick={loadReview} className="inline-flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/15 px-3 py-2 text-xs font-semibold text-amber-100 hover:bg-amber-400/20">
+                <ClipboardCheck size={14} /> Review
+              </button>
+              <button onClick={handleDownload} className="inline-flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-400/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-400/20">
+                <Cloud size={14} /> Download Project
+              </button>
+            </>
           )}
           <div className={`flex items-center gap-2 text-xs ${connected ? 'text-forge-success' : 'text-forge-error'}`}>
             <div className={`h-2 w-2 rounded-full ${connected ? 'bg-forge-success' : 'bg-forge-error'}`} />
@@ -467,6 +664,59 @@ function BuilderView(props) {
         </div>
       )}
 
+      {reviewOpen && (
+        <div className="max-h-[calc(100vh-220px)] overflow-y-auto overscroll-contain border-b border-forge-border bg-forge-panel/80 px-4 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Review before live execution</h3>
+              <p className="mt-1 text-xs text-forge-muted">Approve only after checking the exact Gmail emails, Slack posts, and Sheets rows below.</p>
+            </div>
+            <button onClick={() => setReviewOpen(false)} className="rounded-lg border border-forge-border px-3 py-1.5 text-xs text-forge-muted hover:text-sky-200">Close</button>
+          </div>
+          {reviewError && <div className="mt-3 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-200">{reviewError}</div>}
+          {editedReviewActions.length ? (
+            <div className="mt-3 grid gap-3 lg:grid-cols-3">
+              {editedReviewActions.map((action, index) => (
+                <div key={`${action.type}-${index}`} className="rounded-lg border border-forge-border bg-forge-bg/60 p-3">
+                  <div className="text-xs font-semibold text-forge-text">{action.label}</div>
+                  {renderReviewEditor(action, index)}
+                </div>
+              ))}
+            </div>
+          ) : liveReview ? <EmptyState title="No live actions found" body="This workflow did not produce reviewable external actions." /> : null}
+          {editedReviewActions.length ? (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button onClick={approveLive} disabled={approvingLive || Boolean(reviewError)} className="inline-flex items-center gap-2 rounded-lg bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-200 disabled:opacity-50">
+                <ShieldCheck size={16} /> {approvingLive ? 'Running live...' : 'Approve & run live'}
+              </button>
+              <span className="text-xs text-forge-muted">{editedReviewActions.length} editable external actions require approval.</span>
+            </div>
+          ) : null}
+          {liveRunResult && (
+            <div className={`mt-3 rounded-lg border p-3 text-xs ${liveRunResult.success ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200' : 'border-red-400/30 bg-red-400/10 text-red-200'}`}>
+              <div className="font-semibold">
+                Live run {liveRunResult.success ? 'completed' : 'failed'}: {liveRunSucceeded}/{liveRunResults.length} actions succeeded.
+              </div>
+              {liveRunResults.length ? (
+                <div className="mt-3 max-h-56 space-y-2 overflow-y-auto pr-1">
+                  {liveRunResults.map((item, index) => (
+                    <div key={`${item.connector_id}-${index}`} className="rounded border border-current/20 bg-black/10 p-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span>{item.label || item.connector_id}</span>
+                        <span className={item.status === 'succeeded' ? 'text-emerald-200' : 'text-red-200'}>{item.status}</span>
+                      </div>
+                      {item.status !== 'succeeded' && (
+                        <div className="mt-1 break-words text-[11px] opacity-90">{liveResultDetail(item)}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex w-[400px] min-w-[350px] flex-col border-r border-forge-border">
           <ChatPanel
@@ -480,6 +730,7 @@ function BuilderView(props) {
             onClarify={sendClarification}
             onSkipClarification={skipClarification}
             onReset={resetState}
+            initialInput={initialPrompt}
           />
         </div>
 
@@ -596,15 +847,12 @@ function AppBuilderView({ builds, onBuildsRefresh }) {
             </div>
           </div>
           <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-            <h3 className="text-sm font-semibold">What this proves</h3>
-            <div className="mt-4 space-y-2">
-              {(latest.next_steps || []).map((step) => <ReadinessRow key={step} label={step} value="next" ok={step.includes('Preview')} />)}
-            </div>
+            <h3 className="text-sm font-semibold">QA checks</h3>
             {latest.qa?.checks?.length ? (
-              <div className="mt-5 space-y-2">
+              <div className="mt-4 space-y-2">
                 {latest.qa.checks.map((check) => <ReadinessRow key={check.id} label={check.label} value={check.status} ok={check.status === 'pass'} />)}
               </div>
-            ) : null}
+            ) : <EmptyState title="No QA checks" body="Generate an app to see artifact checks." />}
           </div>
         </div>
       )}
@@ -612,14 +860,13 @@ function AppBuilderView({ builds, onBuildsRefresh }) {
   )
 }
 
-function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRefresh }) {
+function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRefresh, onProviderRefresh }) {
   const services = providerStatus?.services || {}
   const [oauthResult, setOauthResult] = useState(null)
   const [oauthError, setOauthError] = useState(null)
   const [callbackForm, setCallbackForm] = useState({ state: '', code: '', exchange: false })
-  const [credentialForm, setCredentialForm] = useState({ service: 'slack', label: 'Local Slack token', kind: 'access_token', secret: '' })
-  const [rotationForm, setRotationForm] = useState({ credential_id: '', secret: '' })
   const [testingService, setTestingService] = useState(null)
+  const [latestTests, setLatestTests] = useState({})
 
   const startOAuth = async (service) => {
     setOauthError(null)
@@ -630,7 +877,11 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setOauthResult(payload)
       setCallbackForm({ state: payload.state, code: '', exchange: false })
+      if (payload.auth_url) {
+        window.open(payload.auth_url, '_blank', 'noopener,noreferrer')
+      }
       onRefresh()
+      onProviderRefresh?.()
     } catch (err) {
       setOauthError(err.message)
     }
@@ -648,42 +899,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setOauthResult(payload)
       onRefresh()
-    } catch (err) {
-      setOauthError(err.message)
-    }
-  }
-
-  const storeCredential = async () => {
-    setOauthError(null)
-    try {
-      const res = await fetch(`${API_URL}/api/vault/credentials`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(credentialForm),
-      })
-      const payload = await res.json()
-      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
-      setOauthResult({ service: payload.service, status: 'credential_encrypted', scopes: [], auth_url: null })
-      setCredentialForm({ ...credentialForm, secret: '' })
-      onRefresh()
-    } catch (err) {
-      setOauthError(err.message)
-    }
-  }
-
-  const rotateCredential = async () => {
-    setOauthError(null)
-    try {
-      const res = await fetch(`${API_URL}/api/vault/credentials/${rotationForm.credential_id}/rotate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secret: rotationForm.secret, metadata: { rotated_from_ui: true } }),
-      })
-      const payload = await res.json()
-      if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
-      setOauthResult({ service: payload.service, status: 'credential_rotated', scopes: [], auth_url: null })
-      setRotationForm({ credential_id: '', secret: '' })
-      onRefresh()
+      onProviderRefresh?.()
     } catch (err) {
       setOauthError(err.message)
     }
@@ -702,6 +918,7 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
       const payload = await res.json()
       if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`)
       setOauthResult({ service, status: payload.test.status, scopes: [], auth_url: null, test: payload.test })
+      setLatestTests((items) => ({ ...items, [service]: payload.test }))
       onRefresh()
     } catch (err) {
       setOauthError(err.message)
@@ -718,7 +935,13 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
         description="ForgeFlow should detect missing credentials and ask for access before producing automations that depend on external systems."
       />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {Object.entries(services).map(([key, service]) => (
+        {Object.entries(services).map(([key, service]) => {
+          const latestTest = latestTests[key] || (connectorLifecycle?.connector_tests || []).find((test) => test.service === key)
+          const testOk = ['connected', 'ready', 'ready_to_probe'].includes(latestTest?.status)
+          const testMessage = latestTest?.error
+            || latestTest?.response?.message
+            || (latestTest?.response?.body?.ok === true ? 'Provider access verified.' : latestTest?.created_at)
+          return (
           <div key={key} className="rounded-lg border border-forge-border bg-forge-panel p-4">
             <div className="mb-4 flex items-center justify-between">
               <div className="grid h-9 w-9 place-items-center rounded-lg bg-sky-400/10 text-sky-300">
@@ -733,12 +956,18 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
               Requires {service.required_env?.length ? service.required_env.join(', ') : 'no credentials'}
             </p>
             {service.oauth_supported && (
-              <button
-                onClick={() => startOAuth(key)}
-                className="mt-4 inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:border-sky-400/40 hover:text-sky-200"
-              >
-                <KeyRound size={14} /> Start OAuth
-              </button>
+              service.oauth_ready ? (
+                <button
+                  onClick={() => startOAuth(key)}
+                  className="mt-4 inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:border-sky-400/40 hover:text-sky-200"
+                >
+                  <KeyRound size={14} /> Start OAuth
+                </button>
+              ) : (
+                <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-forge-border/70 px-3 py-2 text-xs text-forge-muted opacity-70" title={`Missing OAuth setup: ${(service.oauth_missing_env || []).join(', ')}`}>
+                  <KeyRound size={14} /> OAuth setup required
+                </div>
+              )
             )}
             <div className="mt-3 flex flex-wrap gap-2">
               <button onClick={() => testConnector(key, false)} disabled={testingService === key} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:border-sky-400/40 hover:text-sky-200 disabled:opacity-50">
@@ -750,8 +979,14 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
                 </button>
               )}
             </div>
+            {latestTest && (
+              <div className={`mt-3 rounded-lg border p-3 text-xs ${testOk ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-red-400/20 bg-red-400/10 text-red-200'}`}>
+                <div className="font-medium">{latestTest.mode}: {latestTest.status}</div>
+                <div className="mt-1 line-clamp-2 text-forge-muted">{testMessage}</div>
+              </div>
+            )}
           </div>
-        ))}
+        )})}
       </div>
 
       {(oauthResult || oauthError) && (
@@ -759,6 +994,11 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
           {oauthError ? oauthError : (
             <div className="space-y-2">
               <div className="font-medium">{oauthResult.service} authorization {oauthResult.status}</div>
+              {oauthResult.auth_url && (
+                <a href={oauthResult.auth_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-sky-400/30 px-3 py-2 text-xs text-sky-200 hover:bg-sky-400/10">
+                  Open authorization page <ArrowRight size={14} />
+                </a>
+              )}
               {oauthResult.auth_url && <div className="break-all text-xs text-forge-muted">{oauthResult.auth_url}</div>}
               {oauthResult.scopes && <div className="text-xs text-forge-muted">Scopes: {oauthResult.scopes.join(', ')}</div>}
               {oauthResult.missing_env?.length ? <div className="text-xs text-amber-200">Missing OAuth env: {oauthResult.missing_env.join(', ')}</div> : null}
@@ -826,57 +1066,6 @@ function ConnectorsView({ providerStatus, capabilities, connectorLifecycle, onRe
             </div>
           </div>
         )}
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
-        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Encrypted credential vault</h3>
-          <div className="mt-4 space-y-3">
-            <input value={credentialForm.service} onChange={(event) => setCredentialForm({ ...credentialForm, service: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="service" />
-            <input value={credentialForm.label} onChange={(event) => setCredentialForm({ ...credentialForm, label: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="label" />
-            <input value={credentialForm.kind} onChange={(event) => setCredentialForm({ ...credentialForm, kind: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="kind" />
-            <input value={credentialForm.secret} onChange={(event) => setCredentialForm({ ...credentialForm, secret: event.target.value })} className="w-full rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-sm outline-none focus:border-sky-400/50" placeholder="secret value" type="password" />
-            <button onClick={storeCredential} className="inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
-              <LockKeyhole size={16} /> Store encrypted
-            </button>
-          </div>
-        </div>
-        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Stored credentials</h3>
-          {(connectorLifecycle?.credentials || []).length === 0 ? <EmptyState title="No vault credentials" body="Store connector tokens locally without exposing raw secret values in the UI." /> : (
-            <div className="mt-4 space-y-2">
-              {connectorLifecycle.credentials.map((credential) => (
-                <div key={credential.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium">{credential.label}</div>
-                    <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-300">{credential.kind}</span>
-                  </div>
-                  <p className="mt-2 text-xs text-forge-muted">{credential.service} · {credential.masked}</p>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="mt-5 rounded-lg border border-forge-border bg-forge-bg/50 p-3">
-            <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Rotate credential</h4>
-            <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_auto]">
-              <input value={rotationForm.credential_id} onChange={(event) => setRotationForm({ ...rotationForm, credential_id: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs outline-none focus:border-sky-400/50" placeholder="credential id" />
-              <input value={rotationForm.secret} onChange={(event) => setRotationForm({ ...rotationForm, secret: event.target.value })} className="rounded-lg border border-forge-border bg-forge-bg px-3 py-2 text-xs outline-none focus:border-sky-400/50" placeholder="new secret" type="password" />
-              <button onClick={rotateCredential} className="rounded-lg border border-forge-border px-3 py-2 text-xs text-forge-muted hover:text-sky-200">Rotate</button>
-            </div>
-          </div>
-          {(connectorLifecycle?.credential_audit || []).length > 0 && (
-            <div className="mt-5">
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-forge-muted">Rotation audit</h4>
-              <div className="space-y-2">
-                {connectorLifecycle.credential_audit.slice(0, 6).map((item) => (
-                  <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3 text-xs text-forge-muted">
-                    {item.service} · {item.action} · {item.created_at}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
       </div>
 
       <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
@@ -1805,7 +1994,7 @@ function IngestionsView({ ingestions, onCapabilitiesRefresh, onIngestionsRefresh
 }
 
 function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefresh, onGapsRefresh }) {
-  const [prompt, setPrompt] = useState('Automate HR onboarding from an Excel sheet, draft a Gmail welcome email, post a Slack announcement, and append a Google Sheets tracking row.')
+  const [prompt, setPrompt] = useState('Automate HR onboarding from an Excel sheet, send a Gmail welcome email, post a Slack announcement, and append a Google Sheets tracking row.')
   const [activeSpec, setActiveSpec] = useState(null)
   const [conversation, setConversation] = useState(null)
   const [autopilot, setAutopilot] = useState(null)
@@ -1814,6 +2003,7 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
   const [repairs, setRepairs] = useState([])
   const [executionPlan, setExecutionPlan] = useState(null)
   const [credentialRequirements, setCredentialRequirements] = useState(null)
+  const [showRuntimeLedger, setShowRuntimeLedger] = useState(false)
   const [message, setMessage] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -2347,8 +2537,24 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
         </div>
 
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Runtime ledger</h3>
-          {runs.length === 0 ? <EmptyState title="No runtime runs" body="Dry-run a compiled spec to record step-level execution state." /> : (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Runtime ledger</h3>
+              <p className="mt-1 text-xs text-forge-muted">Step-level audit trail for dry-runs and approved live runs.</p>
+            </div>
+            <button
+              onClick={() => setShowRuntimeLedger((visible) => !visible)}
+              className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-3 py-1.5 text-xs font-medium text-forge-muted hover:text-sky-200"
+            >
+              {showRuntimeLedger ? 'Hide' : 'Show'}
+              <ChevronRight size={14} className={`transition-transform ${showRuntimeLedger ? 'rotate-90' : ''}`} />
+            </button>
+          </div>
+          {!showRuntimeLedger ? (
+            <div className="mt-4 rounded-lg border border-forge-border bg-forge-bg/50 p-4 text-xs text-forge-muted">
+              {runs.length} {runs.length === 1 ? 'run' : 'runs'} recorded. Click Show to inspect the ledger.
+            </div>
+          ) : runs.length === 0 ? <EmptyState title="No runtime runs" body="Dry-run a compiled spec to record step-level execution state." /> : (
             <div className="mt-4 space-y-3">
               {runs.map((run) => (
                 <div key={run.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
@@ -2381,7 +2587,8 @@ function RuntimeView({ specs, adapters, runtimeRuns, onSpecsRefresh, onRunsRefre
 function EvalsView({ evals, onRefresh }) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState(null)
-  const latestRun = evals?.runs?.[0]
+  const latestAudit = evals?.audits?.[0]
+  const regressionRun = evals?.runs?.[0]
 
   const runSuite = async () => {
     setRunning(true)
@@ -2405,42 +2612,89 @@ function EvalsView({ evals, onRefresh }) {
   return (
     <div className="space-y-8">
       <SectionTitle
-        eyebrow="Evaluation Lab"
-        title="Measure prompt-to-automation quality before claiming coverage"
-        description="Run deterministic preflight evals against core business automation fixtures so regressions are visible."
+        eyebrow="Run Audit"
+        title="Check whether ForgeFlow behaved correctly"
+        description="Audit recent Builder and Runtime runs for connector capture, approval gates, credential blockers, test results, dry-run safety, and secret redaction."
       />
       <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Core suite</h3>
-          <p className="mt-2 text-sm leading-6 text-forge-muted">{evals?.suites?.[0]?.cases?.length || 0} cases covering HR onboarding, incident routing, and CSV enrichment.</p>
-          <button onClick={runSuite} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-sky-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-200">
-            <Gauge size={16} /> {running ? 'Running...' : 'Run evals'}
-          </button>
-          {error && <div className="mt-3 text-xs text-red-300">{error}</div>}
-        </div>
-        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
-          <h3 className="text-sm font-semibold">Latest score</h3>
-          {!latestRun ? <EmptyState title="No eval run yet" body="Run the core suite to create a quality baseline." /> : (
-            <div className="mt-4 space-y-3">
-              <div className="text-4xl font-semibold text-forge-text">{Math.round(latestRun.score * 100)}%</div>
-              {latestRun.cases.map((item) => (
-                <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-medium">{item.id}</div>
-                    <span className={`rounded-full px-2 py-1 text-[11px] ${item.passed ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{Math.round(item.score * 100)}%</span>
-                  </div>
-                  <p className="mt-2 text-xs text-forge-muted">Detected: {item.detected.join(', ') || 'none'}</p>
-                </div>
-              ))}
+          <h3 className="text-sm font-semibold">Latest run audit</h3>
+          {!latestAudit ? <EmptyState title="No runs to audit" body="Run Builder or Runtime first, then return here to audit the result." /> : (
+            <div className="mt-4 space-y-4">
+              <div>
+                <div className="text-4xl font-semibold text-forge-text">{Math.round(latestAudit.score * 100)}%</div>
+                <div className="mt-1 text-xs text-forge-muted">{latestAudit.title} · {latestAudit.status}</div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(latestAudit.connectors || []).map((connector) => (
+                  <span key={connector} className="rounded bg-forge-bg px-2 py-1 text-[10px] text-forge-muted">{connector}</span>
+                ))}
+                {(latestAudit.connectors || []).length === 0 && <span className="text-xs text-forge-muted">No connectors recorded</span>}
+              </div>
+              <div className="space-y-2">
+                {latestAudit.checks.map((check) => (
+                  <ReadinessRow key={check.id} label={check.label} value={check.status} ok={check.status === 'pass'} />
+                ))}
+              </div>
             </div>
           )}
         </div>
+        <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+          <h3 className="text-sm font-semibold">Recent audited runs</h3>
+          <div className="mt-4 space-y-3">
+            {(evals?.audits || []).slice(0, 6).map((audit) => (
+              <div key={audit.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{audit.title}</div>
+                    <div className="mt-1 text-xs text-forge-muted">{audit.kind} · {audit.status}</div>
+                  </div>
+                  <span className={`rounded-full px-2 py-1 text-[11px] ${audit.score >= 0.8 ? 'bg-emerald-400/10 text-emerald-300' : audit.score >= 0.5 ? 'bg-amber-400/10 text-amber-300' : 'bg-red-400/10 text-red-300'}`}>
+                    {Math.round(audit.score * 100)}%
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-forge-muted">
+                  {(audit.connectors || []).slice(0, 4).join(', ') || 'No connectors recorded'}
+                </p>
+              </div>
+            ))}
+            {(evals?.audits || []).length === 0 && <EmptyState title="No audit history" body="Recent run audits will appear here." />}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-forge-border bg-forge-panel p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold">Regression suite</h3>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-forge-muted">
+              Optional fixed baseline covering {evals?.suites?.[0]?.cases?.length || 0} known automation patterns. This catches platform regressions, while the audit above checks actual recent runs.
+            </p>
+          </div>
+          <button onClick={runSuite} disabled={running} className="inline-flex items-center gap-2 rounded-lg border border-forge-border px-4 py-2 text-sm text-forge-muted hover:border-sky-400/40 hover:text-sky-200 disabled:opacity-50">
+            <Gauge size={16} /> {running ? 'Running...' : 'Run regression'}
+          </button>
+        </div>
+        {error && <div className="mt-3 text-xs text-red-300">{error}</div>}
+        {regressionRun && (
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            {regressionRun.cases.map((item) => (
+              <div key={item.id} className="rounded-lg border border-forge-border bg-forge-bg/50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium">{item.id}</div>
+                  <span className={`rounded-full px-2 py-1 text-[11px] ${item.passed ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{Math.round(item.score * 100)}%</span>
+                </div>
+                <p className="mt-2 text-xs text-forge-muted">Detected: {item.detected.join(', ') || 'none'}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-function TemplatesView({ templates, onNavigate }) {
+function TemplatesView({ templates, onUseTemplate }) {
   return (
     <div className="space-y-8">
       <SectionTitle
@@ -2457,7 +2711,7 @@ function TemplatesView({ templates, onNavigate }) {
             <div className="mt-4 flex flex-wrap gap-1">
               {template.connectors.map((connector) => <span key={connector} className="rounded bg-forge-bg px-2 py-1 text-[10px] text-forge-muted">{connector}</span>)}
             </div>
-            <button onClick={() => onNavigate('builder')} className="mt-5 inline-flex items-center gap-2 text-xs text-sky-300 hover:text-sky-200">
+            <button onClick={() => onUseTemplate(template)} className="mt-5 inline-flex items-center gap-2 text-xs text-sky-300 hover:text-sky-200">
               Open builder <ArrowRight size={14} />
             </button>
           </div>
@@ -2659,11 +2913,12 @@ function EmptyState({ title, body }) {
 
 function AppWorkspace({ onLanding }) {
   const ws = useWebSocket()
-  const { status: providerStatus, error: providerError } = useProviderStatus()
+  const { status: providerStatus, error: providerError, refresh: refreshProviderStatus } = useProviderStatus()
   const [activeView, setActiveView] = useState(() => {
     const requested = new URLSearchParams(window.location.search).get('view')
     return NAV_ITEMS.some((item) => item.id === requested) ? requested : 'dashboard'
   })
+  const [builderTemplatePrompt, setBuilderTemplatePrompt] = useState('')
   const overview = useApiResource('/api/product/overview', { metrics: {}, workflows: [], recent_runs: [] })
   const capabilities = useApiResource('/api/capabilities', { capabilities: [] })
   const approvals = useApiResource('/api/approvals', { pending: [], policy: [] })
@@ -2689,6 +2944,10 @@ function AppWorkspace({ onLanding }) {
     url.searchParams.set('view', view)
     window.history.replaceState({}, '', url)
   }, [])
+  const useTemplate = useCallback((template) => {
+    setBuilderTemplatePrompt(template.prompt)
+    navigateView('builder')
+  }, [navigateView])
 
   return (
     <div className="flex h-screen bg-forge-bg text-forge-text">
@@ -2735,11 +2994,11 @@ function AppWorkspace({ onLanding }) {
 
         <main className="min-h-0 flex-1 overflow-auto p-6">
           {activeView === 'dashboard' && <DashboardView overview={overview.data} providerStatus={providerStatus} onNavigate={navigateView} />}
-          {activeView === 'builder' && <BuilderView {...ws} />}
+          {activeView === 'builder' && <BuilderView {...ws} initialPrompt={builderTemplatePrompt} />}
           {activeView === 'appbuilder' && <AppBuilderView builds={appBuilds.data} onBuildsRefresh={appBuilds.refetch} />}
           {activeView === 'runtime' && <RuntimeView specs={specs.data} adapters={connectorAdapters.data} runtimeRuns={runtimeRuns.data} onSpecsRefresh={specs.refetch} onRunsRefresh={runtimeRuns.refetch} onGapsRefresh={gaps.refetch} />}
           {activeView === 'judge' && <JudgeDemoView />}
-          {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} />}
+          {activeView === 'connectors' && <ConnectorsView providerStatus={providerStatus} capabilities={capabilities.data} connectorLifecycle={connectorLifecycle.data} onRefresh={connectorLifecycle.refetch} onProviderRefresh={refreshProviderStatus} />}
           {activeView === 'schemas' && <SchemaExplorerView />}
           {activeView === 'approvals' && <ApprovalsView approvals={approvals.data} onRefresh={approvals.refetch} />}
           {activeView === 'triggers' && <TriggersView triggers={triggers.data} onRefresh={triggers.refetch} />}
@@ -2747,7 +3006,7 @@ function AppWorkspace({ onLanding }) {
           {activeView === 'runs' && <RunsView runs={runs.data} observability={observability.data} onRefresh={() => { runs.refetch(); observability.refetch() }} />}
           {activeView === 'ingestions' && <IngestionsView ingestions={ingestions.data} onCapabilitiesRefresh={capabilities.refetch} onIngestionsRefresh={ingestions.refetch} />}
           {activeView === 'evals' && <EvalsView evals={evals.data} onRefresh={evals.refetch} />}
-          {activeView === 'templates' && <TemplatesView templates={templates.data} onNavigate={navigateView} />}
+          {activeView === 'templates' && <TemplatesView templates={templates.data} onUseTemplate={useTemplate} />}
           {activeView === 'roadmap' && <RoadmapView gaps={gaps.data} />}
         </main>
 

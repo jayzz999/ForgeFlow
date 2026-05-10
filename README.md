@@ -1,6 +1,6 @@
 # ForgeFlow
 
-ForgeFlow turns plain-English business requests into grounded automation workflows and runnable software artifacts. It can collect requirements conversationally, discover APIs, import OpenAPI/MCP capabilities, validate credentials, preview risky actions, run durable jobs, generate app-builder artifacts, and prepare deployment targets.
+ForgeFlow turns plain-English business requests into grounded automation workflows and runnable software artifacts. It can collect requirements conversationally, discover APIs, import OpenAPI/MCP capabilities, validate credentials, generate and test workflow code, preview/edit live actions, and execute approved connector actions.
 
 ## What It Does
 
@@ -12,7 +12,7 @@ Most automation tools expect users to know APIs, auth, schemas, and workflow int
 | 2 | API + Tool Discovery | Searches built-in connectors, imported OpenAPI specs, MCP manifests, and public API directories |
 | 3 | Canonical Spec Compiler | Converts prompts into typed workflow specs with steps, connector contracts, tests, approvals, and deployment targets |
 | 4 | Credential Center | Stores encrypted credentials, starts OAuth flows, rotates secrets, probes connectors, and reports missing credentials per workflow |
-| 5 | Runtime Planner | Produces safe live-execution plans with required fields, credentials, approval state, request previews, and compensation hints |
+| 5 | Review + Approval Runtime | Converts dry-run output or workflow DAGs into editable Gmail, Slack, and Sheets actions, then executes only after approval |
 | 6 | Durable Runtime | Queues webhook/scheduled/manual jobs, retries failures, dead-letters exhausted jobs, records run logs, and recovers stale running items |
 | 7 | Code Generator + Sandbox | Generates Python workflow packages, reviews them, tests them, executes them in Docker when available, and self-debug patches failures |
 | 8 | App Builder | Routes software prompts, such as games or web apps, into runnable HTML/CSS/JS artifacts with QA checks and package downloads |
@@ -36,13 +36,13 @@ Canonical Automation Spec
 Credential + Approval Preflight
     |
     v
-Dry Run / Execution Plan
+Sandbox Dry Run / DAG Fallback
     |
     v
-Queue Worker / Webhook / Schedule
+Editable Review + Approval
     |
     v
-Live Connector Runtime OR Codegen Sandbox <--> Self-Debug Loop
+Live Connector Runtime OR Queue Worker
     |
     v
 Deployment Dispatch / App Package
@@ -53,7 +53,7 @@ Deployment Dispatch / App Package
 ForgeFlow has three main workspaces:
 
 - **Automation Builder**: prompt to generated Python workflow project.
-- **Runtime**: prompt to canonical automation spec, dry-run ledger, credential checks, live execution planning, approvals, exports, and repair.
+- **Runtime**: prompt to canonical automation spec, run ledger, credential checks, live execution planning, approvals, exports, and repair.
 - **App Builder**: prompt to runnable app/game/site artifact with live preview, QA checks, and zip download.
 
 Demo replay still exists for walkthroughs, but production mode blocks demo endpoints unless explicitly enabled.
@@ -77,7 +77,13 @@ ForgeFlow supports both built-in connectors and dynamically imported tools.
 | OpenAPI Imports | Spec-defined auth | Operations become capabilities automatically |
 | MCP Manifests | Tool-defined auth | Tools become JSON-RPC execution capabilities |
 
-Live execution is approval-first. If credentials, required fields, or approvals are missing, ForgeFlow blocks the run and explains the next action instead of pretending the workflow deployed.
+Live execution is approval-first. The Builder shows editable action cards before writing to external systems:
+
+- Gmail cards let reviewers edit recipient, subject, and body, then send via Gmail API after approval.
+- Slack cards let reviewers edit channel and message, then post through Slack Web API after approval.
+- Sheets cards let reviewers edit range and row JSON, then append through Google Sheets API after approval.
+
+If generated code only emits logs instead of structured dry-run JSON, ForgeFlow falls back to the generated DAG and still builds a reviewable action list. If credentials, required fields, or approvals are missing, ForgeFlow blocks the run and explains the next action instead of pretending the workflow deployed.
 
 ## Runtime APIs
 
@@ -93,6 +99,8 @@ GET  /api/specs/{spec_id}/credentials
 POST /api/runtime/specs/{spec_id}/execution-plan
 POST /api/runtime/specs/{spec_id}/dry-run
 POST /api/runtime/specs/{spec_id}/execute-live
+GET  /api/workflows/{workflow_id}/live-review
+POST /api/workflows/{workflow_id}/approve-live
 POST /api/queue
 POST /api/queue/{queue_id}/process
 POST /api/queue/process-due
@@ -121,6 +129,27 @@ npm run dev
 ```
 
 Open `http://localhost:3000`.
+
+For the local demo setup used during development, the frontend may run on `http://127.0.0.1:3002` while the backend runs on `http://127.0.0.1:8000`.
+
+## Demo Flow
+
+Use this prompt in Builder:
+
+```text
+Automate HR onboarding from an uploaded Excel sheet, send a welcome email, post a Slack announcement, and append tracking data.
+```
+
+Expected flow:
+
+1. ForgeFlow generates and validates a workflow package.
+2. The sandbox performs a dry run or produces enough DAG detail for review fallback.
+3. Click **Review**.
+4. Edit Gmail, Slack, and Sheets action cards if needed.
+5. Click **Approve & run live**.
+6. Verify the email was sent, Slack messages appeared, and Google Sheets rows were appended.
+
+See `docs/SPEC_SHEET.md` for the interview/demo spec.
 
 ## Docker Compose
 
@@ -237,11 +266,15 @@ SLACK_SIGNING_SECRET=your-signing-secret
 SLACK_NOTIFICATION_CHANNEL=#forgeflow-alerts
 SLACK_DISABLED=0
 
-GMAIL_ADDRESS=your-email@gmail.com
-GMAIL_APP_PASSWORD=your-app-password
-
-GOOGLE_API_KEY=your-api-key
+# Google OAuth-backed connectors
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/connectors/oauth/callback
+GMAIL_ACCESS_TOKEN=
+GMAIL_SENDER_EMAIL=your-email@gmail.com
+GOOGLE_SHEETS_ACCESS_TOKEN=
 GOOGLE_SHEET_ID=your-spreadsheet-id
+GOOGLE_CALENDAR_ACCESS_TOKEN=
 
 CHROMA_PERSIST_DIR=./chroma_db
 SANDBOX_TIMEOUT=60

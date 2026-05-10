@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import csv
+import html
 import hmac
 import hashlib
 import json
@@ -8,6 +9,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import ssl
 import sys
 import tempfile
 import uuid
@@ -26,7 +28,7 @@ logging.getLogger("slack_sdk").setLevel(logging.WARNING)
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from backend.connectors.catalog import BASE_CAPABILITIES, SERVICE_MARKERS, SERVICE_TO_DEFAULT_CAPABILITY, capability_specs
 from backend.shared.config import settings
@@ -603,7 +605,11 @@ def _oauth_specs() -> dict[str, dict]:
             "client_id_env": "GOOGLE_CLIENT_ID",
             "client_secret_env": "GOOGLE_CLIENT_SECRET",
             "redirect_uri_env": "GOOGLE_OAUTH_REDIRECT_URI",
-            "scopes": ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"],
+            "scopes": [
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.compose",
+            ],
             "env_vars": ["GMAIL_ACCESS_TOKEN", "GMAIL_SENDER_EMAIL"],
         },
         "sheets": {
@@ -898,24 +904,141 @@ def _credential_services() -> set[str]:
     return {item["service"] for item in _list_credentials() if item.get("valid")}
 
 
+def _credential_records_for_service(service: str) -> list[dict]:
+    conn = _platform_db()
+    rows = conn.execute("SELECT * FROM credential_vault WHERE service = ? ORDER BY updated_at DESC", (service,)).fetchall()
+    conn.close()
+    credentials = []
+    for row in rows:
+        try:
+            credentials.append({
+                "service": row["service"],
+                "label": row["label"],
+                "kind": row["kind"],
+                "secret": _decrypt_secret(row["ciphertext"]),
+                "metadata": _json_loads(row["metadata_json"], {}),
+            })
+        except Exception:
+            continue
+    return credentials
+
+
+def _credential_record_for_service(service: str) -> dict | None:
+    credentials = _credential_records_for_service(service)
+    for kind in ("access_token", "api_key", "bot_token", "token", "password", "client_secret", "refresh_token"):
+        credential = next((item for item in credentials if item.get("kind") == kind), None)
+        if credential:
+            return credential
+    if credentials:
+        return credentials[0]
+    return None
+
+
+def _config_for_service(service: str) -> dict:
+    """Return non-secret connector config from env plus encrypted-vault metadata."""
+    config = {}
+    if service in {"gmail", "sheets", "calendar"}:
+        google_oauth = _credential_record_for_service("google_oauth")
+        if google_oauth:
+            metadata = google_oauth.get("metadata", {})
+            if isinstance(metadata, dict):
+                config.update(metadata)
+    credential = _credential_record_for_service(service)
+    if credential:
+        metadata = credential.get("metadata", {})
+        if isinstance(metadata, dict):
+            config.update(metadata)
+    for name in SUPPORTED_SERVICES.get(service, {}).get("env_vars", ()):
+        value = os.getenv(name)
+        if value:
+            config[name] = value
+            config[name.lower()] = value
+    return config
+
+
+def _connector_config_value(service: str, *names: str) -> str:
+    config = _config_for_service(service)
+    for name in names:
+        candidates = {
+            name,
+            name.lower(),
+            name.upper(),
+            name.removeprefix(f"{service}_"),
+            name.removeprefix(f"{service}_").lower(),
+        }
+        for candidate in candidates:
+            value = config.get(candidate)
+            if value not in (None, ""):
+                return str(value)
+    return ""
+
+
+def _oauth_config_services(service: str, spec: dict) -> list[str]:
+    prefix = str(spec.get("client_id_env", "")).split("_", 1)[0].lower()
+    services = [f"{service}_oauth", service]
+    if prefix:
+        services.append(f"{prefix}_oauth")
+    return list(dict.fromkeys(services))
+
+
+def _oauth_config_value(service: str, env_name: str, spec: dict) -> str:
+    env_value = os.getenv(env_name)
+    if env_value:
+        return env_value
+
+    suffix = env_name.lower()
+    if suffix.endswith("_client_id"):
+        short_key = "client_id"
+    elif suffix.endswith("_client_secret"):
+        short_key = "client_secret"
+    elif suffix.endswith("_oauth_redirect_uri"):
+        short_key = "redirect_uri"
+    else:
+        short_key = suffix
+
+    for credential_service in _oauth_config_services(service, spec):
+        credential = _credential_record_for_service(credential_service)
+        if not credential:
+            continue
+        metadata = credential.get("metadata", {})
+        if isinstance(metadata, dict):
+            for key in (env_name, suffix, short_key):
+                value = metadata.get(key)
+                if value not in (None, ""):
+                    return str(value)
+        if short_key == "client_secret" and credential.get("kind") in {"client_secret", "oauth_client_secret"}:
+            return str(credential.get("secret", ""))
+    return ""
+
+
+def _missing_config_request(connector_id: str, missing: list[str]) -> dict:
+    return _json_request(
+        "POST",
+        f"connector://config/{connector_id}",
+        {"Accept": "application/json"},
+        {"missing_config": missing},
+    )
+
+
+def _https_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _secret_for_service(service: str) -> str | None:
     info = SUPPORTED_SERVICES.get(service, {})
     secret_markers = ("TOKEN", "KEY", "SECRET", "PASSWORD")
     env_vars = list(info.get("env_vars", ()))
     preferred_envs = [name for name in env_vars if any(marker in name.upper() for marker in secret_markers)]
-    for env_name in preferred_envs + [name for name in env_vars if name not in preferred_envs]:
+    for env_name in preferred_envs:
         value = os.getenv(env_name)
         if value:
             return value
-    conn = _platform_db()
-    rows = conn.execute("SELECT * FROM credential_vault WHERE service = ? ORDER BY updated_at DESC", (service,)).fetchall()
-    conn.close()
-    for row in rows:
-        try:
-            return _decrypt_secret(row["ciphertext"])
-        except Exception:
-            continue
-    return None
+    credential = _credential_record_for_service(service)
+    return credential["secret"] if credential else None
 
 
 def _oauth_env_readiness(service: str) -> dict:
@@ -923,8 +1046,9 @@ def _oauth_env_readiness(service: str) -> dict:
     if not spec:
         return {"available": False, "missing": ["oauth_spec"], "present": []}
     required = [spec["client_id_env"], spec["client_secret_env"], spec["redirect_uri_env"]]
-    env = _env_status(required)
-    return {"available": env["configured"], **env}
+    present = [name for name in required if _oauth_config_value(service, name, spec)]
+    missing = [name for name in required if name not in present]
+    return {"available": not missing, "configured": not missing, "present": present, "missing": missing}
 
 
 def _exchange_oauth_code(service: str, code: str, redirect_uri: str | None = None) -> dict:
@@ -937,11 +1061,11 @@ def _exchange_oauth_code(service: str, code: str, redirect_uri: str | None = Non
         raise HTTPException(status_code=400, detail=f"Missing OAuth env: {', '.join(readiness['missing'])}")
 
     data = {
-        "client_id": os.environ[spec["client_id_env"]],
-        "client_secret": os.environ[spec["client_secret_env"]],
+        "client_id": _oauth_config_value(service, spec["client_id_env"], spec),
+        "client_secret": _oauth_config_value(service, spec["client_secret_env"], spec),
         "code": code,
         "grant_type": "authorization_code",
-        "redirect_uri": redirect_uri or os.environ[spec["redirect_uri_env"]],
+        "redirect_uri": redirect_uri or _oauth_config_value(service, spec["redirect_uri_env"], spec),
     }
     encoded = urlencode(data).encode("utf-8")
     request = Request(
@@ -951,7 +1075,7 @@ def _exchange_oauth_code(service: str, code: str, redirect_uri: str | None = Non
         method="POST",
     )
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20, context=_https_context()) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPException:
         raise
@@ -982,6 +1106,46 @@ def _exchange_oauth_code(service: str, code: str, redirect_uri: str | None = Non
         "stored_credentials": [{"id": item["id"], "label": item["label"], "kind": item["kind"], "masked": item["masked"]} for item in stored],
         "response_keys": sorted(payload.keys()),
     }
+
+
+def _refresh_oauth_access_token(service: str) -> str | None:
+    spec = _oauth_specs().get(service)
+    if not spec:
+        return None
+    refresh_credential = next((item for item in _credential_records_for_service(service) if item.get("kind") == "refresh_token"), None)
+    if not refresh_credential:
+        return None
+    readiness = _oauth_env_readiness(service)
+    if not readiness["available"]:
+        return None
+    data = {
+        "client_id": _oauth_config_value(service, spec["client_id_env"], spec),
+        "client_secret": _oauth_config_value(service, spec["client_secret_env"], spec),
+        "refresh_token": refresh_credential["secret"],
+        "grant_type": "refresh_token",
+    }
+    request = Request(
+        spec["token_url"],
+        data=urlencode(data).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20, context=_https_context()) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    token_value = payload.get("access_token")
+    if not token_value:
+        return None
+    _store_credential(
+        service,
+        f"{service} access_token",
+        "access_token",
+        str(token_value),
+        {"token_response_keys": sorted(payload.keys()), "refreshed_from": refresh_credential["label"]},
+    )
+    return str(token_value)
 
 
 def _trim_output(value: str) -> str:
@@ -2022,7 +2186,7 @@ def _required_live_fields(connector_id: str) -> list[str]:
         "notion.update_database": ["database_id", "properties"],
         "airtable.create_record": ["table", "fields"],
         "airtable.update_record": ["table", "record_id", "fields"],
-        "teams.post_message": ["channel_id", "text"],
+        "teams.post_message": ["team_id", "channel_id", "text"],
         "slack.post_message": ["channel", "text"],
         "gmail.send_email": ["to", "subject", "body"],
         "sheets.append_row": ["values"],
@@ -2184,9 +2348,12 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
         path = "payment_intents" if str(payment_id).startswith("pi_") else "charges"
         return {"method": "GET", "url": f"https://api.stripe.com/v1/{path}/{payment_id}", "headers": headers, "body": None}
     if connector_id == "zendesk.create_ticket":
-        subdomain = os.getenv("ZENDESK_SUBDOMAIN", "")
-        if os.getenv("ZENDESK_EMAIL"):
-            token = base64.b64encode(f"{os.getenv('ZENDESK_EMAIL')}/token:{secret}".encode("utf-8")).decode("ascii")
+        subdomain = _connector_config_value("zendesk", "ZENDESK_SUBDOMAIN", "subdomain")
+        email = _connector_config_value("zendesk", "ZENDESK_EMAIL", "email")
+        if not subdomain or not email:
+            return _missing_config_request(connector_id, [name for name, value in {"ZENDESK_SUBDOMAIN": subdomain, "ZENDESK_EMAIL": email}.items() if not value])
+        if email:
+            token = base64.b64encode(f"{email}/token:{secret}".encode("utf-8")).decode("ascii")
             headers = {"Accept": "application/json", "Authorization": f"Basic {token}"}
         body = {"ticket": {"subject": inputs.get("subject"), "comment": {"body": _input_value(inputs, "body", "description", "comment")}}}
         return _json_request("POST", f"https://{subdomain}.zendesk.com/api/v2/tickets.json", headers, body)
@@ -2209,7 +2376,9 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
         body = {"properties": inputs.get("properties", {})}
         return _json_request("PATCH", f"https://api.hubapi.com/crm/v3/objects/deals/{inputs.get('deal_id')}", headers, body)
     if connector_id == "okta.assign_group":
-        org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
+        org_url = _connector_config_value("okta", "OKTA_ORG_URL", "org_url").rstrip("/")
+        if not org_url:
+            return _missing_config_request(connector_id, ["OKTA_ORG_URL"])
         return {
             "method": "PUT",
             "url": f"{org_url}/api/v1/groups/{inputs.get('group_id')}/users/{inputs.get('user_id')}",
@@ -2217,27 +2386,39 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
             "body": None,
         }
     if connector_id == "okta.create_user":
-        org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
+        org_url = _connector_config_value("okta", "OKTA_ORG_URL", "org_url").rstrip("/")
+        if not org_url:
+            return _missing_config_request(connector_id, ["OKTA_ORG_URL"])
         return _json_request("POST", f"{org_url}/api/v1/users?activate=false", {"Accept": "application/json", "Authorization": f"SSWS {secret}"}, inputs.get("profile", inputs))
     if connector_id == "salesforce.create_record":
-        instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
+        instance_url = _connector_config_value("salesforce", "SALESFORCE_INSTANCE_URL", "instance_url").rstrip("/")
+        if not instance_url:
+            return _missing_config_request(connector_id, ["SALESFORCE_INSTANCE_URL"])
         object_name = inputs.get("object")
         return _json_request("POST", f"{instance_url}/services/data/v60.0/sobjects/{object_name}/", headers, inputs.get("fields", {}))
     if connector_id == "salesforce.update_record":
-        instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
+        instance_url = _connector_config_value("salesforce", "SALESFORCE_INSTANCE_URL", "instance_url").rstrip("/")
+        if not instance_url:
+            return _missing_config_request(connector_id, ["SALESFORCE_INSTANCE_URL"])
         object_name = inputs.get("object")
         return _json_request("PATCH", f"{instance_url}/services/data/v60.0/sobjects/{object_name}/{inputs.get('record_id')}", headers, inputs.get("fields", {}))
     if connector_id == "jira.create_issue":
-        base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
-        auth = base64.b64encode(f"{os.getenv('JIRA_EMAIL', '')}:{secret}".encode("utf-8")).decode("ascii")
+        base_url = _connector_config_value("jira", "JIRA_BASE_URL", "base_url").rstrip("/")
+        email = _connector_config_value("jira", "JIRA_EMAIL", "email")
+        if not base_url or not email:
+            return _missing_config_request(connector_id, [name for name, value in {"JIRA_BASE_URL": base_url, "JIRA_EMAIL": email}.items() if not value])
+        auth = base64.b64encode(f"{email}:{secret}".encode("utf-8")).decode("ascii")
         jira_headers = {"Accept": "application/json", "Authorization": f"Basic {auth}"}
         body = {"fields": {"project": {"key": _input_value(inputs, "project_key", "project")}, "summary": inputs.get("summary"), "issuetype": {"name": inputs.get("issue_type", "Task")}}}
         if inputs.get("description"):
             body["fields"]["description"] = inputs["description"]
         return _json_request("POST", f"{base_url}/rest/api/3/issue", jira_headers, body)
     if connector_id == "jira.transition_issue":
-        base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
-        auth = base64.b64encode(f"{os.getenv('JIRA_EMAIL', '')}:{secret}".encode("utf-8")).decode("ascii")
+        base_url = _connector_config_value("jira", "JIRA_BASE_URL", "base_url").rstrip("/")
+        email = _connector_config_value("jira", "JIRA_EMAIL", "email")
+        if not base_url or not email:
+            return _missing_config_request(connector_id, [name for name, value in {"JIRA_BASE_URL": base_url, "JIRA_EMAIL": email}.items() if not value])
+        auth = base64.b64encode(f"{email}:{secret}".encode("utf-8")).decode("ascii")
         body = {"transition": {"id": str(inputs.get("transition_id"))}}
         return _json_request("POST", f"{base_url}/rest/api/3/issue/{inputs.get('issue_id')}/transitions", {"Accept": "application/json", "Authorization": f"Basic {auth}"}, body)
     if connector_id == "notion.create_page":
@@ -2247,11 +2428,15 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
         body = {"properties": inputs.get("properties", {})}
         return _json_request("PATCH", f"https://api.notion.com/v1/databases/{inputs.get('database_id')}", {**headers, "Notion-Version": "2022-06-28"}, body)
     if connector_id == "airtable.create_record":
-        base_id = os.getenv("AIRTABLE_BASE_ID", "")
+        base_id = _connector_config_value("airtable", "AIRTABLE_BASE_ID", "base_id")
+        if not base_id:
+            return _missing_config_request(connector_id, ["AIRTABLE_BASE_ID"])
         body = {"fields": inputs.get("fields", {})}
         return _json_request("POST", f"https://api.airtable.com/v0/{base_id}/{quote(str(inputs.get('table')))}", headers, body)
     if connector_id == "airtable.update_record":
-        base_id = os.getenv("AIRTABLE_BASE_ID", "")
+        base_id = _connector_config_value("airtable", "AIRTABLE_BASE_ID", "base_id")
+        if not base_id:
+            return _missing_config_request(connector_id, ["AIRTABLE_BASE_ID"])
         body = {"fields": inputs.get("fields", {})}
         return _json_request("PATCH", f"https://api.airtable.com/v0/{base_id}/{quote(str(inputs.get('table')))}/{inputs.get('record_id')}", headers, body)
     if connector_id == "teams.post_message":
@@ -2271,12 +2456,16 @@ def _connector_live_request(connector_id: str, inputs: dict, secret: str | None)
         ).decode("ascii")
         return _json_request("POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts", headers, {"message": {"raw": raw}})
     if connector_id == "sheets.append_row":
-        sheet_id = os.getenv("GOOGLE_SHEET_ID", inputs.get("sheet_id", ""))
+        sheet_id = inputs.get("sheet_id") or _connector_config_value("sheets", "GOOGLE_SHEET_ID", "sheet_id", "spreadsheet_id")
+        if not sheet_id:
+            return _missing_config_request(connector_id, ["GOOGLE_SHEET_ID"])
         range_name = quote(str(inputs.get("range", "Sheet1!A1")), safe="")
         body = {"values": inputs.get("values", [])}
         return _json_request("POST", f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}:append?valueInputOption=USER_ENTERED", headers, body)
     if connector_id == "sheets.read_rows":
-        sheet_id = os.getenv("GOOGLE_SHEET_ID", inputs.get("sheet_id", ""))
+        sheet_id = inputs.get("sheet_id") or _connector_config_value("sheets", "GOOGLE_SHEET_ID", "sheet_id", "spreadsheet_id")
+        if not sheet_id:
+            return _missing_config_request(connector_id, ["GOOGLE_SHEET_ID"])
         range_name = quote(str(inputs.get("range", "Sheet1!A1")), safe="")
         return {"method": "GET", "url": f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}", "headers": headers, "body": None}
     if connector_id == "http.request":
@@ -2420,7 +2609,7 @@ def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_
             headers=request_spec.get("headers", {}),
             method=request_spec.get("method", "POST"),
         )
-        with urlopen(req, timeout=20) as response:
+        with urlopen(req, timeout=20, context=_https_context()) as response:
             text = response.read().decode("utf-8", errors="replace")[:4000]
             return "succeeded", {
                 "live_call_performed": True,
@@ -2856,7 +3045,7 @@ def _connector_probe_request(service: str, secret: str | None) -> dict | None:
     if service == "gmail":
         return {"method": "GET", "url": "https://gmail.googleapis.com/gmail/v1/users/me/profile", "headers": headers, "body": None}
     if service == "sheets":
-        sheet_id = os.getenv("GOOGLE_SHEET_ID", "")
+        sheet_id = _connector_config_value("sheets", "GOOGLE_SHEET_ID", "sheet_id", "spreadsheet_id")
         if not sheet_id:
             return None
         return {"method": "GET", "url": f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}", "headers": headers, "body": None}
@@ -2865,23 +3054,27 @@ def _connector_probe_request(service: str, secret: str | None) -> dict | None:
     if service == "hubspot":
         return {"method": "GET", "url": "https://api.hubapi.com/crm/v3/owners?limit=1", "headers": headers, "body": None}
     if service == "zendesk":
-        subdomain = os.getenv("ZENDESK_SUBDOMAIN", "")
+        subdomain = _connector_config_value("zendesk", "ZENDESK_SUBDOMAIN", "subdomain")
+        email = _connector_config_value("zendesk", "ZENDESK_EMAIL", "email")
         if not subdomain:
             return None
+        if email:
+            token = base64.b64encode(f"{email}/token:{secret}".encode("utf-8")).decode("ascii")
+            headers = {"Accept": "application/json", "Authorization": f"Basic {token}"}
         return {"method": "GET", "url": f"https://{subdomain}.zendesk.com/api/v2/users/me.json", "headers": headers, "body": None}
     if service == "okta":
-        org_url = os.getenv("OKTA_ORG_URL", "").rstrip("/")
+        org_url = _connector_config_value("okta", "OKTA_ORG_URL", "org_url").rstrip("/")
         if not org_url:
             return None
         return {"method": "GET", "url": f"{org_url}/api/v1/users?limit=1", "headers": {"Accept": "application/json", "Authorization": f"SSWS {secret}"}, "body": None}
     if service == "salesforce":
-        instance_url = os.getenv("SALESFORCE_INSTANCE_URL", "").rstrip("/")
+        instance_url = _connector_config_value("salesforce", "SALESFORCE_INSTANCE_URL", "instance_url").rstrip("/")
         if not instance_url:
             return None
         return {"method": "GET", "url": f"{instance_url}/services/data/v60.0/limits", "headers": headers, "body": None}
     if service == "jira":
-        base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
-        email = os.getenv("JIRA_EMAIL", "")
+        base_url = _connector_config_value("jira", "JIRA_BASE_URL", "base_url").rstrip("/")
+        email = _connector_config_value("jira", "JIRA_EMAIL", "email")
         if not base_url or not email:
             return None
         auth = base64.b64encode(f"{email}:{secret}".encode("utf-8")).decode("ascii")
@@ -2988,13 +3181,33 @@ def _test_connector_service(service: str, live: bool = False) -> dict:
             headers=request_spec.get("headers", {}),
             method=request_spec.get("method", "GET"),
         )
-        with urlopen(req, timeout=15) as response:
+        with urlopen(req, timeout=15, context=_https_context()) as response:
             text = response.read().decode("utf-8", errors="replace")[:2000]
             parsed = _json_loads(text, {"text": text})
             status = "connected" if response.status < 400 else "failed"
             return _record_connector_test(service, status, "live_read_only_probe", safe_request, {"status_code": response.status, "body": parsed})
     except HTTPError as exc:
         error_text = exc.read().decode("utf-8", errors="replace")[:1000] if hasattr(exc, "read") else str(exc)
+        if exc.code == 401:
+            refreshed_secret = _refresh_oauth_access_token(service)
+            if refreshed_secret:
+                retry_spec = _connector_probe_request(service, refreshed_secret)
+                if retry_spec:
+                    try:
+                        retry_req = Request(
+                            retry_spec["url"],
+                            data=retry_spec.get("body"),
+                            headers=retry_spec.get("headers", {}),
+                            method=retry_spec.get("method", "GET"),
+                        )
+                        with urlopen(retry_req, timeout=15, context=_https_context()) as response:
+                            text = response.read().decode("utf-8", errors="replace")[:2000]
+                            parsed = _json_loads(text, {"text": text})
+                            status = "connected" if response.status < 400 else "failed"
+                            retry_response = {"status_code": response.status, "body": parsed, "token_refreshed": True}
+                            return _record_connector_test(service, status, "live_read_only_probe", safe_request, retry_response)
+                    except Exception:
+                        pass
         return _record_connector_test(service, "failed", "live_read_only_probe", safe_request, {"status_code": exc.code}, error_text)
     except URLError as exc:
         return _record_connector_test(service, "failed", "live_read_only_probe", safe_request, {}, str(exc.reason)[:1000])
@@ -3744,7 +3957,7 @@ def _fetch_json_url(url: str) -> dict:
         raise HTTPException(status_code=400, detail="Only public https:// URLs are supported")
     req = Request(url, headers={"User-Agent": "ForgeFlow API Discovery/1.0"})
     try:
-        with urlopen(req, timeout=20) as response:
+        with urlopen(req, timeout=20, context=_https_context()) as response:
             payload = response.read().decode("utf-8", errors="replace")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not fetch URL: {exc}")
@@ -4321,6 +4534,123 @@ def _list_eval_runs() -> list[dict]:
     ]
 
 
+def _audit_runtime_run(run: dict) -> dict:
+    steps = run.get("steps", [])
+    connectors = sorted({step.get("connector_id", "") for step in steps if step.get("connector_id")})
+    external_steps = [step for step in steps if step.get("connector_id", "").split(".", 1)[0] not in {"schema", "http"}]
+    approval_steps = [step for step in steps if step.get("status") == "waiting_for_approval"]
+    blocked_steps = [step for step in steps if step.get("status") == "blocked"]
+    error_text = json.dumps(run, default=str)
+    checks = [
+        {
+            "id": "connectors_detected",
+            "label": "Connector steps recorded",
+            "status": "pass" if bool(connectors) else "warn",
+            "detail": ", ".join(connectors) if connectors else "No connector steps were recorded for this run.",
+        },
+        {
+            "id": "external_writes_gated",
+            "label": "External writes gated",
+            "status": "pass" if not external_steps or approval_steps else "warn",
+            "detail": f"{len(approval_steps)} step(s) waited for approval.",
+        },
+        {
+            "id": "dry_run_safety",
+            "label": "Dry-run avoided live calls",
+            "status": "pass" if run.get("mode") != "dry_run" or not run.get("output", {}).get("live_call_performed") else "fail",
+            "detail": "No provider writes were performed during dry-run." if run.get("mode") == "dry_run" else f"Run mode: {run.get('mode')}",
+        },
+        {
+            "id": "credential_blocking",
+            "label": "Credential gaps surfaced",
+            "status": "pass" if blocked_steps or run.get("status") not in {"blocked", "failed"} else "warn",
+            "detail": f"{len(blocked_steps)} blocked step(s)." if blocked_steps else "No credential blocker in this run.",
+        },
+        {
+            "id": "completion_state",
+            "label": "Final status is explicit",
+            "status": "pass" if run.get("status") in {"succeeded", "waiting_for_approval", "blocked", "failed"} else "warn",
+            "detail": run.get("status", "unknown"),
+        },
+        {
+            "id": "secret_redaction",
+            "label": "No obvious secret leakage",
+            "status": "pass" if not any(marker in error_text.lower() for marker in ("bearer ", "xoxb-", "sk_live", "sk_test", "api_token")) else "fail",
+            "detail": "Run record does not expose common token patterns.",
+        },
+    ]
+    pass_count = sum(1 for check in checks if check["status"] == "pass")
+    return {
+        "id": f"audit_{run['id']}",
+        "run_id": run["id"],
+        "kind": "runtime",
+        "title": run.get("spec_id", run["id"]),
+        "status": run.get("status"),
+        "mode": run.get("mode"),
+        "created_at": run.get("started_at"),
+        "score": round(pass_count / len(checks), 2),
+        "connectors": connectors,
+        "checks": checks,
+    }
+
+
+def _audit_generated_run(run: dict) -> dict:
+    tests_total = int(run.get("tests_total") or 0)
+    tests_passed = int(run.get("tests_passed") or 0)
+    services = run.get("services") or []
+    checks = [
+        {
+            "id": "execution_status",
+            "label": "Execution status explicit",
+            "status": "pass" if run.get("status") in {"success", "failed", "needs_review"} else "warn",
+            "detail": run.get("status", "unknown"),
+        },
+        {
+            "id": "tests_recorded",
+            "label": "Generated tests recorded",
+            "status": "pass" if tests_total > 0 else "warn",
+            "detail": f"{tests_passed}/{tests_total} tests passed" if tests_total else "No test result count recorded.",
+        },
+        {
+            "id": "tests_passing",
+            "label": "Tests passed",
+            "status": "pass" if tests_total > 0 and tests_passed == tests_total else ("warn" if tests_total == 0 else "fail"),
+            "detail": f"{tests_passed}/{tests_total}",
+        },
+        {
+            "id": "connectors_named",
+            "label": "Connector/services captured",
+            "status": "pass" if services else "warn",
+            "detail": ", ".join(services) if services else "No services listed on this generated workflow.",
+        },
+        {
+            "id": "runtime_outcome",
+            "label": "Runtime outcome matches status",
+            "status": "pass" if bool(run.get("success")) == (run.get("status") == "success") else "warn",
+            "detail": f"success={bool(run.get('success'))}",
+        },
+    ]
+    pass_count = sum(1 for check in checks if check["status"] == "pass")
+    return {
+        "id": f"audit_{run.get('run_id') or run['workflow_id']}",
+        "run_id": run.get("run_id"),
+        "workflow_id": run.get("workflow_id"),
+        "kind": "generated_workflow",
+        "title": run.get("name") or run.get("workflow_id"),
+        "status": run.get("status"),
+        "created_at": run.get("created_at"),
+        "score": round(pass_count / len(checks), 2),
+        "connectors": services,
+        "checks": checks,
+    }
+
+
+def _recent_run_audits(limit: int = 8) -> list[dict]:
+    audits = [_audit_runtime_run(run) for run in _list_runtime_runs(limit=limit)]
+    audits.extend(_audit_generated_run(run) for run in _collect_run_history(limit=limit))
+    return sorted(audits, key=lambda item: str(item.get("created_at") or ""), reverse=True)[:limit]
+
+
 def _product_gap_analysis() -> dict:
     connectors = _list_connector_states()
     credentials = _list_credentials()
@@ -4692,13 +5022,17 @@ async def provider_status():
     services = {}
     for key, info in SUPPORTED_SERVICES.items():
         required_env = info.get("env_vars", ())
+        oauth_readiness = _oauth_env_readiness(key)
+        has_credential = bool(_secret_for_service(key))
         services[key] = {
             "name": info["name"],
-            "configured": all(bool(os.getenv(env_name, "")) for env_name in required_env),
+            "configured": all(bool(os.getenv(env_name, "")) for env_name in required_env) or has_credential,
             "required_env": required_env,
             "auth_type": info.get("auth_type", "api_key"),
             "source": info.get("source", "catalog"),
             "oauth_supported": key in _oauth_specs(),
+            "oauth_ready": bool(oauth_readiness.get("available")),
+            "oauth_missing_env": oauth_readiness.get("missing", []) if key in _oauth_specs() else [],
         }
 
     return {
@@ -5453,8 +5787,8 @@ async def start_oauth_connector(service: str):
     if not spec:
         raise HTTPException(status_code=404, detail="OAuth connector not available for this service")
     state = _stable_id("oauth", {"service": service})
-    client_id = os.getenv(spec["client_id_env"], "")
-    redirect_uri = os.getenv(spec["redirect_uri_env"], "http://127.0.0.1:8000/api/connectors/oauth/callback")
+    client_id = _oauth_config_value(service, spec["client_id_env"], spec)
+    redirect_uri = _oauth_config_value(service, spec["redirect_uri_env"], spec) or "http://127.0.0.1:8000/api/connectors/oauth/callback"
     query = {
         "client_id": client_id or f"missing-{spec['client_id_env']}",
         "redirect_uri": redirect_uri,
@@ -5488,9 +5822,51 @@ async def start_oauth_connector(service: str):
         "oauth_env": _oauth_env_readiness(service),
         "missing_env": [
             name for name in (spec["client_id_env"], spec["client_secret_env"], spec["redirect_uri_env"])
-            if not os.getenv(name, "")
+            if not _oauth_config_value(service, name, spec)
         ],
         "message": "OAuth session created. Complete callback after provider authorization.",
+    }
+
+
+@app.post("/api/connectors/google-oauth/setup")
+async def save_google_oauth_setup(body: dict):
+    """Store Google OAuth client setup in the encrypted local vault instead of editing .env."""
+    client_id = str(body.get("client_id", "")).strip()
+    client_secret = str(body.get("client_secret", "")).strip()
+    redirect_uri = str(body.get("redirect_uri", "http://localhost:8000/api/connectors/oauth/callback")).strip()
+    sender_email = str(body.get("sender_email", "")).strip()
+    sheet_id = str(body.get("sheet_id", "")).strip()
+    if not client_id or not client_secret or not redirect_uri:
+        raise HTTPException(status_code=400, detail="client_id, client_secret, and redirect_uri are required")
+
+    metadata = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "GOOGLE_CLIENT_ID": client_id,
+        "GOOGLE_OAUTH_REDIRECT_URI": redirect_uri,
+        "configured_from_ui": True,
+        "services": ["gmail", "sheets", "calendar"],
+    }
+    if sender_email:
+        metadata["sender_email"] = sender_email
+        metadata["GMAIL_SENDER_EMAIL"] = sender_email
+    if sheet_id:
+        metadata["sheet_id"] = sheet_id
+        metadata["GOOGLE_SHEET_ID"] = sheet_id
+
+    credential = _store_credential("google_oauth", "Google OAuth client", "client_secret", client_secret, metadata)
+    _upsert_connector_state(
+        service="google_oauth",
+        status="oauth_client_configured",
+        auth_type="oauth2_client",
+        scopes=[],
+        env_vars=[],
+        metadata={"credential_id": credential["id"], "label": credential["label"], "services": metadata["services"]},
+    )
+    return {
+        "status": "stored",
+        "credential": {"id": credential["id"], "label": credential["label"], "masked": credential["masked"]},
+        "readiness": {service: _oauth_env_readiness(service) for service in ("gmail", "sheets", "calendar")},
     }
 
 
@@ -5586,9 +5962,43 @@ async def complete_oauth_connector(body: dict):
     return {"service": service, "status": connector["status"], "connector": connector, "token_exchange": token_exchange}
 
 
+@app.get("/api/connectors/oauth/callback", response_class=HTMLResponse)
+async def complete_oauth_connector_redirect(state: str = "", code: str = "", error: str = ""):
+    """Handle provider redirects so non-technical users do not copy OAuth codes manually."""
+    if error:
+        safe_error = html.escape(error)
+        return HTMLResponse(
+            f"<h1>ForgeFlow authorization failed</h1><p>{safe_error}</p><p>You can close this tab and retry from Connector Center.</p>",
+            status_code=400,
+        )
+    try:
+        result = await complete_oauth_connector({"state": state, "code": code, "exchange": True})
+    except HTTPException as exc:
+        safe_detail = html.escape(str(exc.detail))
+        return HTMLResponse(
+            f"<h1>ForgeFlow authorization needs attention</h1><p>{safe_detail}</p><p>Return to Connector Center and check the OAuth setup.</p>",
+            status_code=exc.status_code,
+        )
+    safe_service = html.escape(str(result["service"]))
+    return HTMLResponse(
+        f"""
+        <html>
+          <body style="font-family: Inter, system-ui, sans-serif; background: #070a0f; color: #e5edf7; padding: 40px;">
+            <h1>{safe_service} connected</h1>
+            <p>ForgeFlow stored the returned OAuth token in the local vault. You can close this tab and return to Connector Center.</p>
+          </body>
+        </html>
+        """
+    )
+
+
 @app.get("/api/evals/suites")
 async def eval_suites():
-    return {"suites": [{"id": key, "cases": value} for key, value in EVAL_SUITES.items()], "runs": _list_eval_runs()}
+    return {
+        "audits": _recent_run_audits(),
+        "suites": [{"id": key, "cases": value} for key, value in EVAL_SUITES.items()],
+        "runs": _list_eval_runs(),
+    }
 
 
 @app.post("/api/evals/run")
@@ -5760,6 +6170,271 @@ async def download_workflow(workflow_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename=forgeflow-{workflow_id}.zip"},
     )
+
+
+def _workflow_dry_run_payload(workflow_id: str) -> dict:
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    execution_path = os.path.join(project_path, "artifacts", "execution_result.json")
+    if not os.path.exists(execution_path):
+        raise HTTPException(status_code=404, detail="Workflow execution artifact not found")
+    with open(execution_path, "r", encoding="utf-8") as file:
+        execution = json.load(file)
+    stdout = execution.get("stdout") or "{}"
+    try:
+        parsed = json.loads(stdout)
+    except Exception:
+        parsed = {}
+    return parsed.get("dry_run_simulation") or parsed
+
+
+def _workflow_artifact(workflow_id: str, name: str) -> dict:
+    from backend.deployment.workflow_store import get_workflow_project_path
+
+    project_path = get_workflow_project_path(workflow_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    artifact_path = os.path.join(project_path, "artifacts", name)
+    if not os.path.exists(artifact_path):
+        return {}
+    with open(artifact_path, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _dry_run_draft(value):
+    if isinstance(value, dict) and isinstance(value.get("draft"), dict):
+        return value["draft"]
+    if isinstance(value, dict):
+        return value
+    return value
+
+
+def _dry_run_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _review_placeholder(value, employee_name: str = "New Employee", employee_email: str = "new.employee@example.com"):
+    if isinstance(value, list):
+        return [[_review_placeholder(cell, employee_name, employee_email) for cell in row] if isinstance(row, list) else _review_placeholder(row, employee_name, employee_email) for row in value]
+    if not isinstance(value, str):
+        return value
+    today = datetime.utcnow().date().isoformat()
+    replacements = {
+        "trigger.name": employee_name,
+        "trigger.email": employee_email,
+        "step_1.outputs.employee_name": employee_name,
+        "step_1.outputs.employee_email": employee_email,
+        "step_3.outputs.append_response.timestamp or current date": today,
+        "current_date": today,
+    }
+    result = value
+    for token, replacement in replacements.items():
+        result = result.replace(token, replacement)
+    return result
+
+
+def _workflow_review_from_dag(workflow_id: str) -> list[dict]:
+    dag = _workflow_artifact(workflow_id, "dag.json")
+    actions = []
+    employee_name = "New Employee"
+    employee_email = "new.employee@example.com"
+    for step in dag.get("steps", []):
+        inputs = step.get("inputs", {}) if isinstance(step.get("inputs"), dict) else {}
+        service = ((step.get("api") or {}).get("service") or step.get("name") or "").lower()
+        if "gmail" in service or "email" in service:
+            to = _review_placeholder(inputs.get("to") or employee_email, employee_name, employee_email)
+            subject = _review_placeholder(inputs.get("subject") or f"Welcome to the Company, {employee_name}!", employee_name, employee_email)
+            body = _review_placeholder(inputs.get("body") or f"Hello {employee_name},\n\nWelcome to the company!\n\nBest regards,\nHR Team", employee_name, employee_email)
+            actions.append({
+                "type": "gmail.send_email",
+                "label": f"Send Gmail email to {to}",
+                "preview": {"to": to, "subject": subject, "body": body},
+            })
+        elif "slack" in service:
+            text = _review_placeholder(inputs.get("text") or f"Please welcome our new team member: {employee_name}!", employee_name, employee_email)
+            if text:
+                actions.append({
+                    "type": "slack.post_message",
+                    "label": "Post Slack announcement",
+                    "preview": {"channel": settings.SLACK_NOTIFICATION_CHANNEL, "text": text},
+                })
+        elif "sheet" in service:
+            rows = _review_placeholder(inputs.get("values") or [[employee_name, employee_email, datetime.utcnow().date().isoformat()]], employee_name, employee_email)
+            actions.append({
+                "type": "sheets.append_row",
+                "label": f"Append {len(rows) if isinstance(rows, list) else 1} tracking rows to Google Sheets",
+                "preview": {"range": str(inputs.get("range") or "Sheet1!A1"), "values": rows if isinstance(rows, list) else [[rows]]},
+            })
+    return actions
+
+
+def _workflow_live_review(workflow_id: str) -> dict:
+    simulation = _workflow_dry_run_payload(workflow_id)
+    emails = [_dry_run_draft(item) for item in _dry_run_list(simulation.get("emails") or simulation.get("email_drafts"))]
+    slack_messages = [
+        _dry_run_draft(item)
+        for item in _dry_run_list(simulation.get("slack_messages") or simulation.get("slack_message_drafts"))
+    ]
+    sheet_rows = []
+    tracking_log = _dry_run_draft(simulation.get("tracking_log"))
+    if isinstance(tracking_log, dict) and isinstance(tracking_log.get("values"), list):
+        sheet_rows = tracking_log["values"]
+    elif isinstance(simulation.get("tracking_row_drafts"), list):
+        sheet_rows = simulation["tracking_row_drafts"]
+    else:
+        it_requests = [
+            _dry_run_draft(item)
+            for item in _dry_run_list(simulation.get("it_requests") or simulation.get("it_request_drafts"))
+        ]
+        sheet_rows = [
+            [
+                item.get("name") or item.get("employee_name", ""),
+                item.get("email") or item.get("employee_email", ""),
+                item.get("role", ""),
+                "Pending",
+            ]
+            for item in it_requests
+            if isinstance(item, dict) and (item.get("name") or item.get("email") or item.get("employee_name") or item.get("employee_email"))
+        ]
+    actions = []
+    for email_item in emails:
+        if not isinstance(email_item, dict):
+            continue
+        actions.append({
+            "type": "gmail.send_email",
+            "label": f"Send Gmail email to {email_item.get('to')}",
+            "preview": {
+                "to": email_item.get("to"),
+                "subject": email_item.get("subject"),
+                "body": email_item.get("body"),
+            },
+        })
+    for message in slack_messages:
+        if isinstance(message, dict):
+            text = message.get("text", "")
+        else:
+            text = str(message)
+        if not text:
+            continue
+        actions.append({
+            "type": "slack.post_message",
+            "label": "Post Slack announcement",
+            "preview": {"channel": settings.SLACK_NOTIFICATION_CHANNEL, "text": text},
+        })
+    if sheet_rows:
+        actions.append({
+            "type": "sheets.append_row",
+            "label": f"Append {len(sheet_rows)} tracking rows to Google Sheets",
+            "preview": {"range": "Sheet1!A1", "values": sheet_rows},
+        })
+    if not actions:
+        actions = _workflow_review_from_dag(workflow_id)
+    return {
+        "workflow_id": workflow_id,
+        "ready": bool(actions),
+        "actions": actions,
+        "approval_required": True,
+        "message": "Review these external actions before approving live execution.",
+    }
+
+
+def _send_live_connector_request(connector_id: str, inputs: dict) -> dict:
+    service = connector_id.split(".", 1)[0]
+    secret = _secret_for_service(service)
+    if not secret:
+        return {"connector_id": connector_id, "status": "blocked", "error": "missing credentials"}
+    request_spec = _connector_live_request(connector_id, inputs, secret)
+    try:
+        req = Request(
+            request_spec["url"],
+            data=request_spec.get("body"),
+            headers=request_spec.get("headers", {}),
+            method=request_spec.get("method", "POST"),
+        )
+        with urlopen(req, timeout=20, context=_https_context()) as response:
+            text = response.read().decode("utf-8", errors="replace")[:2000]
+            parsed = _json_loads(text, {"text": text})
+            provider_ok = parsed.get("ok", True) is not False if isinstance(parsed, dict) else True
+            return {
+                "connector_id": connector_id,
+                "status": "succeeded" if response.status < 400 and provider_ok else "failed",
+                "status_code": response.status,
+                "response": parsed,
+                "error": parsed.get("error") if isinstance(parsed, dict) and parsed.get("ok") is False else None,
+            }
+    except HTTPError as exc:
+        if exc.code == 401 and _refresh_oauth_access_token(service):
+            return _send_live_connector_request(connector_id, inputs)
+        error_text = exc.read().decode("utf-8", errors="replace")[:1000] if hasattr(exc, "read") else str(exc)
+        return {"connector_id": connector_id, "status": "failed", "status_code": exc.code, "error": _redact_sensitive(error_text, secret)}
+    except Exception as exc:
+        return {"connector_id": connector_id, "status": "failed", "error": _redact_sensitive(str(exc), secret)}
+
+
+def _approved_review_actions(review: dict, body: dict) -> list[dict]:
+    supplied = body.get("actions")
+    if supplied is None:
+        return review["actions"]
+    if not isinstance(supplied, list) or len(supplied) != len(review["actions"]):
+        raise HTTPException(status_code=400, detail="Approved action edits must match the reviewed action list.")
+    approved = []
+    for index, original in enumerate(review["actions"]):
+        edited = supplied[index]
+        if not isinstance(edited, dict):
+            raise HTTPException(status_code=400, detail=f"Action {index + 1} is invalid.")
+        if edited.get("type") != original.get("type"):
+            raise HTTPException(status_code=400, detail=f"Action {index + 1} type changed.")
+        preview = edited.get("preview")
+        if not isinstance(preview, dict):
+            raise HTTPException(status_code=400, detail=f"Action {index + 1} preview must be an object.")
+        approved.append({**original, "preview": preview})
+    return approved
+
+
+@app.get("/api/workflows/{workflow_id}/live-review")
+async def workflow_live_review(workflow_id: str):
+    """Return external actions that would run after approval."""
+    return _workflow_live_review(workflow_id)
+
+
+@app.post("/api/workflows/{workflow_id}/approve-live")
+async def approve_workflow_live(workflow_id: str, body: dict):
+    """Run reviewed external actions only after explicit approval."""
+    if not body.get("approved"):
+        raise HTTPException(status_code=403, detail="approved=true is required")
+    review = _workflow_live_review(workflow_id)
+    if not review["ready"]:
+        raise HTTPException(status_code=400, detail="No reviewable live actions found")
+    results = []
+    for action in _approved_review_actions(review, body):
+        connector_id = action["type"]
+        preview = action["preview"]
+        result = None
+        if connector_id in {"gmail.create_draft", "gmail.send_email"}:
+            result = _send_live_connector_request(connector_id, preview)
+        elif connector_id == "slack.post_message":
+            result = _send_live_connector_request(connector_id, preview)
+        elif connector_id == "sheets.append_row":
+            result = _send_live_connector_request(connector_id, preview)
+        if result:
+            results.append({**result, "label": action.get("label", connector_id), "preview": preview})
+    success = all(item.get("status") == "succeeded" for item in results)
+    run_result = {
+        "success": success,
+        "stdout": json.dumps({"approved_live_results": results}, indent=2),
+        "stderr": "" if success else "One or more live connector actions failed.",
+        "execution_time": 0.0,
+        "return_code": 0 if success else 1,
+    }
+    run_result.update(_record_run_log(workflow_id, run_result))
+    return {"workflow_id": workflow_id, "success": success, "results": results, "run": run_result}
 
 
 @app.get("/api/workflows/{workflow_id}/files")

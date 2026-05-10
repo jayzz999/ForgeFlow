@@ -348,8 +348,23 @@ def _service_key(service_name: str) -> str:
     return normalized
 
 
-def _credential_options_satisfied(options: tuple[tuple[str, ...], ...]) -> bool:
-    return any(all(os.getenv(name) for name in group) for group in options)
+def _credential_value_available(service: str, env_name: str) -> bool:
+    secret_markers = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+    if any(marker in env_name.upper() for marker in secret_markers):
+        try:
+            from backend.main import _secret_for_service
+            return bool(_secret_for_service(service))
+        except Exception:
+            return bool(os.getenv(env_name))
+    try:
+        from backend.main import _connector_config_value
+        return bool(_connector_config_value(service, env_name))
+    except Exception:
+        return bool(os.getenv(env_name))
+
+
+def _credential_options_satisfied(service: str, options: tuple[tuple[str, ...], ...]) -> bool:
+    return any(all(_credential_value_available(service, name) for name in group) for group in options)
 
 
 def _missing_credential_requirements(dag_data: dict) -> list[dict]:
@@ -362,7 +377,7 @@ def _missing_credential_requirements(dag_data: dict) -> list[dict]:
             continue
         seen.add(service)
         options = SERVICE_CREDENTIAL_OPTIONS.get(service)
-        if not options or _credential_options_satisfied(options):
+        if not options or _credential_options_satisfied(service, options):
             continue
         missing.append({
             "service": service,
@@ -577,6 +592,16 @@ async def sandbox_execute_node(state: ForgeFlowState) -> dict:
             "stdout": result.stdout[:500],
             "execution_time": result.execution_time,
         })
+    elif result.error == "SANDBOX_UNAVAILABLE":
+        await _emit(state, "node.status_changed", "Sandbox execution skipped", {
+            "node_id": "all",
+            "status": "warning",
+        })
+        await _emit(state, "execution.validation_only", "Code validated, but sandbox execution is unavailable because Docker is not running.", {
+            "stdout": result.stdout[:500],
+            "error": result.error,
+            "attempt": attempt,
+        })
     else:
         # ── TASK 2: Emit failure status for all nodes ──
         await _emit(state, "node.status_changed", "Execution failed", {
@@ -652,9 +677,14 @@ async def present_to_user_node(state: ForgeFlowState) -> dict:
     test_results = state.get("test_results", {})
 
     tests_passed = bool(test_results.get("success"))
+    stdout = str(exec_result.get("stdout", ""))
+    generated_code = state.get("generated_code", "") or ""
+    dry_run_only = "dry_run" in stdout.lower() or "dry-run" in generated_code.lower()
 
     if success:
-        if tests_passed:
+        if dry_run_only:
+            msg = "Workflow dry-run simulation executed successfully. No live Slack, Gmail, or Sheets writes were performed."
+        elif tests_passed:
             msg = "✅ Workflow generated, tested, and ready for approval!"
         else:
             msg = "✅ Workflow executed successfully, but generated tests need review before approval."
@@ -663,6 +693,8 @@ async def present_to_user_node(state: ForgeFlowState) -> dict:
                 msg = f"✅ Workflow self-debugged ({debug_attempts} fix{'es' if debug_attempts > 1 else ''}) — tested and ready for approval!"
             else:
                 msg = f"✅ Workflow self-debugged ({debug_attempts} fix{'es' if debug_attempts > 1 else ''}) and executed, but generated tests need review."
+    elif exec_result.get("error") == "SANDBOX_UNAVAILABLE":
+        msg = "⚠️ Workflow generated and code validated, but sandbox execution was skipped because Docker is not running. Start Docker to run the workflow locally."
     else:
         msg = f"⚠️ Workflow generated but had issues after {debug_attempts} attempts. Review before deploying."
 
@@ -692,7 +724,7 @@ async def present_to_user_node(state: ForgeFlowState) -> dict:
 
     return {
         "final_message": msg,
-        "phase": "awaiting_approval" if success else "failed",
+        "phase": "awaiting_approval" if success or exec_result.get("error") == "SANDBOX_UNAVAILABLE" else "failed",
         "approval_status": approval,
     }
 
@@ -752,6 +784,8 @@ async def deploy_node(state: ForgeFlowState) -> dict:
 
     project_dir = deploy_result["project_dir"]
     files = deploy_result["files"]
+    stdout = str((state.get("execution_result") or {}).get("stdout", ""))
+    dry_run_only = "dry_run" in stdout.lower() or "dry-run" in code.lower()
 
     # ── CONTINUOUS IMPROVEMENT: Record feedback & pattern stats ──
     exec_result = state.get("execution_result", {})
@@ -786,14 +820,21 @@ async def deploy_node(state: ForgeFlowState) -> dict:
         {"workflow_id": workflow_id, "services": services, "debug_attempts": debug_attempts},
     )
 
-    await _emit(state, "workflow.deployed", f"Workflow deployed! ID: {workflow_id} — saved {len(files)} files to {project_dir}", {
+    deploy_message = (
+        f"Dry-run workflow project saved. ID: {workflow_id} — saved {len(files)} files to {project_dir}. No live provider writes were performed."
+        if dry_run_only
+        else f"Workflow deployed! ID: {workflow_id} — saved {len(files)} files to {project_dir}"
+    )
+    await _emit(state, "workflow.deployed", deploy_message, {
         "workflow_id": workflow_id,
         "project_dir": project_dir,
         "files": files,
         "services": services,
+        "dry_run_only": dry_run_only,
     })
 
-    return {"deployed": True, "phase": "deployed", "final_message": f"Workflow deployed! ID: {workflow_id}"}
+    final_message = f"Dry-run workflow project saved. ID: {workflow_id}" if dry_run_only else f"Workflow deployed! ID: {workflow_id}"
+    return {"deployed": True, "phase": "deployed", "final_message": final_message}
 
 
 # ── Routing Functions ─────────────────────────────────────────
@@ -826,6 +867,8 @@ def route_after_execution(state: ForgeFlowState) -> str:
     result = state.get("execution_result", {})
     if result.get("success"):
         return "success"
+    if result.get("error") == "SANDBOX_UNAVAILABLE":
+        return "validation_only"
     return "failure"
 
 
@@ -897,6 +940,7 @@ def build_graph():
 
     graph.add_conditional_edges("sandbox_execute", route_after_execution, {
         "success": "present_to_user",
+        "validation_only": "present_to_user",
         "failure": "self_debug",
     })
 
