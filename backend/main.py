@@ -2611,12 +2611,16 @@ def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_
         )
         with urlopen(req, timeout=20, context=_https_context()) as response:
             text = response.read().decode("utf-8", errors="replace")[:4000]
-            return "succeeded", {
+            parsed_response = _json_loads(text, {"text": text})
+            provider_ok = parsed_response.get("ok", True) is not False if isinstance(parsed_response, dict) else True
+            status = "succeeded" if response.status < 400 and provider_ok else "failed"
+            error = parsed_response.get("error") if not provider_ok and isinstance(parsed_response, dict) else None
+            return status, {
                 "live_call_performed": True,
                 "status_code": response.status,
-                "response": _json_loads(text, {"text": text}),
+                "response": parsed_response,
                 "compensation": _compensation_for_step(connector_id, step_inputs),
-            }, None
+            }, error
     except Exception as exc:
         return "failed", {"live_call_performed": True, "request_url": request_spec["url"]}, _redact_sensitive(str(exc), secret)
 
