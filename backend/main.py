@@ -2602,23 +2602,43 @@ def _execute_live_connector_step(spec: dict, step: dict, inputs: dict, approved_
             "request": {k: v for k, v in request_spec.items() if k != "body"},
         }, None
 
-    try:
-        req = Request(
-            request_spec["url"],
-            data=request_spec.get("body"),
-            headers=request_spec.get("headers", {}),
-            method=request_spec.get("method", "POST"),
-        )
-        with urlopen(req, timeout=20, context=_https_context()) as response:
-            text = response.read().decode("utf-8", errors="replace")[:4000]
-            return "succeeded", {
-                "live_call_performed": True,
-                "status_code": response.status,
-                "response": _json_loads(text, {"text": text}),
-                "compensation": _compensation_for_step(connector_id, step_inputs),
-            }, None
-    except Exception as exc:
-        return "failed", {"live_call_performed": True, "request_url": request_spec["url"]}, _redact_sensitive(str(exc), secret)
+    import time
+    from urllib.error import HTTPError
+
+    import time
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            req = Request(
+                request_spec["url"],
+                data=request_spec.get("body"),
+                headers=request_spec.get("headers", {}),
+                method=request_spec.get("method", "POST"),
+            )
+            with urlopen(req, timeout=20, context=_https_context()) as response:
+                text = response.read().decode("utf-8", errors="replace")[:4000]
+                parsed_response = _json_loads(text, {"text": text})
+                provider_ok = parsed_response.get("ok", True) is not False if isinstance(parsed_response, dict) else True
+                status = "succeeded" if response.status < 400 and provider_ok else "failed"
+                error = parsed_response.get("error") if not provider_ok and isinstance(parsed_response, dict) else None
+                return status, {
+                    "live_call_performed": True,
+                    "status_code": response.status,
+                    "response": parsed_response,
+                    "compensation": _compensation_for_step(connector_id, step_inputs),
+                }, error
+        except HTTPError as exc:
+            if exc.code == 401 and attempt == 1 and _refresh_oauth_access_token(service):
+                secret = _secret_for_service(service)
+                request_spec = _connector_live_request(connector_id, step_inputs, secret)
+                continue
+            if exc.code in {429, 502, 503, 504} and attempt < max_attempts:
+                time.sleep(2 ** attempt)
+                continue
+            error_text = exc.read().decode("utf-8", errors="replace")[:1000] if hasattr(exc, "read") else str(exc)
+            return "failed", {"live_call_performed": True, "request_url": request_spec["url"], "status_code": exc.code}, _redact_sensitive(error_text, secret)
+        except Exception as exc:
+            return "failed", {"live_call_performed": True, "request_url": request_spec["url"]}, _redact_sensitive(str(exc), secret)
 
 
 def _compensation_for_step(connector_id: str, inputs: dict) -> dict:
